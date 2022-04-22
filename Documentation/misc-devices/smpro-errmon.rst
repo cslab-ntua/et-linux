@@ -70,8 +70,9 @@ The format of the error lines is defended on the alert/event type.
 
 Below table defines the value of Error types, Sub Types, Sub component and instance:
 
-    ============   ==========    =========   ===============  ================
+    ============   ==========    =========   ===============  ====================================
     Error Group    Error Type    Sub type    Sub component    Instance
+    ============   ==========    =========   ===============  ====================================
     CPM            0             0           Snoop-Logic      CPM #
     CPM            0             2           Armv8 Core 1     CPM #
     MCU            1             1           ERR1             MCU # | SLOT << 11
@@ -125,7 +126,7 @@ Below table defines the value of Error types, Sub Types, Sub component and insta
     PMpro          11            ERR0        0                0
     PMpro          11            ERR1        1                0
     PMpro          11            MPA_ERR     2                0
-    =============  ==========    =========   ===============  ================
+    ============   ==========    =========   ===============  ====================================
 
 
 2) Type 2 for the Internal SMpro/PMpro alert types::
