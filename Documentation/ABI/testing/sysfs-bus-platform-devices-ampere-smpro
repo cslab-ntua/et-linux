@@ -1,0 +1,157 @@
+What:		/sys/bus/platform/devices/smpro-errmon.*/error_[core|mem|pcie|other]_[ce|ue]
+KernelVersion:	5.18
+Contact:	quan@os.amperecomputing.com
+Description:
+		(RO) Contains the 48-byte Ampere (Vendor-Specific) Error Record, see [1],
+		printed in hex format as below:
+
+		AABBCCCCDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD\
+		DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
+		Where:
+		  AA       : Error Type
+		  BB       : Subtype
+		  CCCC     : Instance
+		  DDD...DDD: 44-byte value similar to the Arm RAS standard error record
+
+		See [1] below for the format details.
+
+		The detail of each sysfs entries is as below:
+		+-------------+---------------------------------------------------------+
+		|   Error     |                   Sysfs entry                           |
+		+-------------+---------------------------------------------------------+
+		| Core's CE   | /sys/bus/platform/devices/smpro-errmon.*/error_core_ce |
+		| Core's UE   | /sys/bus/platform/devices/smpro-errmon.*/error_core_ue |
+		| Memory's CE | /sys/bus/platform/devices/smpro-errmon.*/error_mem_ce  |
+		| Memory's UE | /sys/bus/platform/devices/smpro-errmon.*/error_mem_ue  |
+		| PCIe's CE   | /sys/bus/platform/devices/smpro-errmon.*/error_pcie_ce |
+		| PCIe's UE   | /sys/bus/platform/devices/smpro-errmon.*/error_pcie_ue |
+		| Other's CE  | /sys/bus/platform/devices/smpro-errmon.*/error_other_ce|
+		| Other's UE  | /sys/bus/platform/devices/smpro-errmon.*/error_other_ue|
+		+-------------+---------------------------------------------------------+
+		UE: Uncorrect-able Error
+		CE: Correct-able Error
+
+		[1] Section 3.3 Ampere (Vendor-Specific) Error Record Formats,
+		    Altra Family RAS Supplement.
+
+
+What:		/sys/bus/platform/devices/smpro-errmon.*/overflow_[core|mem|pcie|other]_[ce|ue]
+KernelVersion:	5.18
+Contact:	quan@os.amperecomputing.com
+Description:
+		(RO) Return the overflow status of each type HW error reported:
+		  0      : No overflow
+		  1      : There is an overflow and the oldest HW errors are dropped
+
+		The detail of each sysfs entries is as below:
+		+-------------+-----------------------------------------------------------+
+		|   Overflow  |                   Sysfs entry                             |
+		+-------------+-----------------------------------------------------------+
+		| Core's CE   | /sys/bus/platform/devices/smpro-errmon.*/overflow_core_ce |
+		| Core's UE   | /sys/bus/platform/devices/smpro-errmon.*/overflow_core_ue |
+		| Memory's CE | /sys/bus/platform/devices/smpro-errmon.*/overflow_mem_ce  |
+		| Memory's UE | /sys/bus/platform/devices/smpro-errmon.*/overflow_mem_ue  |
+		| PCIe's CE   | /sys/bus/platform/devices/smpro-errmon.*/overflow_pcie_ce |
+		| PCIe's UE   | /sys/bus/platform/devices/smpro-errmon.*/overflow_pcie_ue |
+		| Other's CE  | /sys/bus/platform/devices/smpro-errmon.*/overflow_other_ce|
+		| Other's UE  | /sys/bus/platform/devices/smpro-errmon.*/overflow_other_ue|
+		+-------------+-----------------------------------------------------------+
+		UE: Uncorrect-able Error
+		CE: Correct-able Error
+
+What:           /sys/bus/platform/devices/smpro-errmon.*/error_[smpro|pmpro]
+KernelVersion:	5.18
+Contact:	quan@os.amperecomputing.com
+Description:
+		(RO) Contains the internal firmware error record printed as hex format
+		as below:
+
+		ABBCDDEEEEFFFFFFFF
+		Where:
+		  A       : Firmware Error Type
+		              1: Warning
+		              2: Error
+			      4: Error with data
+		  BB      : Firmware Image Code (8-bit value)
+		  C       : Direction:
+		              0: Enter
+		              1: Exit
+		  DD      : Location, firmware module location code (8-bit value)
+		  EEEE    : Error Code, firmware Error Code (16-bit value)
+		  FFFFFFFF: Extensive data (32-bit value)
+
+		Example:
+		  root@mtjade:~# cat /sys/bus/platform/devices/smpro-errmon.1.auto/error_smpro
+		  109008000a00000000
+
+		The detail of each sysfs entries is as below:
+		+-------------+-------------------------------------------------------+
+		|   Error     |                   Sysfs entry                         |
+		+-------------+-------------------------------------------------------+
+		| SMpro error | /sys/bus/platform/devices/smpro-errmon.*/error_smpro  |
+		| PMpro error | /sys/bus/platform/devices/smpro-errmon.*/error_pmpro  |
+		+-------------+-------------------------------------------------------+
+		See more details in section 5.10 RAS Internal Error Register Definitions,
+		Altra Family Soc BMC Interface Specification.
+
+
+What:           /sys/bus/platform/devices/smpro-errmon.*/event_[vrd_warn_fault|vrd_hot|dimm_hot]
+KernelVersion:	5.18
+Contact:	quan@os.amperecomputing.com
+Description:
+		(RO) Contains the detail information in case of VRD/DIMM warning/hot events
+		in hex format as below:
+
+		AABBBB
+		Where:
+		  AA  : The event channel
+		          00: VRD Warning Fault
+		          01: VRD Hot
+			  02: DIMM host
+		  BBBB: The event detail information data
+
+		See more details in section 5.7 GPI Status Registers,
+		Altra Family Soc BMC Interface Specification.
+
+
+What:		/sys/bus/platform/devices/smpro-misc.*/boot_progress
+KernelVersion:	5.18
+Contact:	quan@os.amperecomputing.com
+Description:
+		(RO) Contains the boot stages information in hex as format below:
+
+		AABBCCCCCCCC
+		Where:
+		  AA      : The boot stages
+		              00: SMpro firmware booting
+		              01: PMpro firmware booting
+		              02: ATF BL1 firmware booting
+		              03: DDR initialization
+		              04: DDR training report status
+		              05: ATF BL2 firmware booting
+		              06: ATF BL31 firmware booting
+		              07: ATF BL32 firmware booting
+		              08: UEFI firmware booting
+		              09: OS booting
+		  BB      : Boot status
+		              00: Not started
+		              01: Started
+		              02: Completed without error
+		              03: Failed.
+		  CCCCCCCC: Boot status information defined for each boot stages
+
+		See more details in section 5.11 Boot Stage Register Definitions,
+		and section 6. Processor Boot Progress Codes, Altra Family Soc BMC
+		Interface Specification.
+
+
+What:           /sys/bus/platform/devices/smpro-misc*/soc_power_limit
+KernelVersion:	5.18
+Contact:	quan@os.amperecomputing.com
+Description:
+		(RW) Contains the desired SoC power limit in Watt.
+		Writes to this sysfs set the desired SoC power limit (W).
+		Reads from this register return the current SoC power limit (W).
+		The value ranges:
+		  Minimum: 120 W
+		  Maximum: Socket TDP power
