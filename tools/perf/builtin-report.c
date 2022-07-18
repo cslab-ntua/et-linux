@@ -988,6 +988,10 @@ static int __cmd_report(struct report *rep)
 						  rep->skip_empty);
 			return 0;
 		}
+
+		if (getenv("DUMP")) {
+			return 0;
+		}
 	}
 
 	ret = report__collapse_hists(rep);

@@ -102,6 +102,15 @@
 
 #include "../../lib/kstrtox.h"
 
+#ifdef CONFIG_COALAPAGING
+extern const struct file_operations coala_proc_ops;
+extern const struct file_operations coala_hints_proc_ops;
+#endif /* CONFIG_COALAPAGING */
+
+#ifdef CONFIG_HAVE_ARCH_ELASTIC_TRANSLATIONS
+extern const struct file_operations et_proc_ops;
+#endif /* CONFIG_HAVE_ARCH_ELASTIC_TRANSLATIONS */
+
 /* NOTE:
  *	Implementing inode permission operations in /proc is almost
  *	certainly an error.  Permission checks need to happen during
@@ -3313,6 +3322,13 @@ static const struct pid_entry tgid_base_stuff[] = {
 #ifdef CONFIG_SECCOMP_CACHE_DEBUG
 	ONE("seccomp_cache", S_IRUSR, proc_pid_seccomp_cache),
 #endif
+#ifdef CONFIG_COALAPAGING
+	REG("coalapaging", S_IRUGO, coala_proc_ops),
+	REG("coala_hints", S_IRUGO, coala_hints_proc_ops),
+#endif /* CONFIG_COALAPAGING */
+#ifdef CONFIG_HAVE_ARCH_ELASTIC_TRANSLATIONS
+	REG("et", S_IRUGO, et_proc_ops),
+#endif /* CONFIG_HAVE_ARCH_ELASTIC_TRANSLATIONS */
 };
 
 static int proc_tgid_base_readdir(struct file *file, struct dir_context *ctx)
@@ -3647,6 +3663,13 @@ static const struct pid_entry tid_base_stuff[] = {
 #ifdef CONFIG_SECCOMP_CACHE_DEBUG
 	ONE("seccomp_cache", S_IRUSR, proc_pid_seccomp_cache),
 #endif
+#ifdef CONFIG_COALAPAGING
+	REG("coalapaging", S_IRUGO, coala_proc_ops),
+	REG("coala_hints", S_IRUGO, coala_hints_proc_ops),
+#endif /* CONFIG_COALAPAGING */
+#ifdef CONFIG_HAVE_ARCH_ELASTIC_TRANSLATIONS
+	REG("et", S_IRUGO, et_proc_ops),
+#endif /* CONFIG_HAVE_ARCH_ELASTIC_TRANSLATIONS */
 };
 
 static int proc_tid_base_readdir(struct file *file, struct dir_context *ctx)

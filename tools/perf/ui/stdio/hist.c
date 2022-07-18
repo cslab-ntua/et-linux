@@ -788,6 +788,9 @@ hists__fprintf_standard_headers(struct hists *hists,
 			first = false;
 
 		width = fmt->width(fmt, hpp, hists);
+		if (getenv("DUMP")) {
+			continue;
+		}
 		for (i = 0; i < width; i++)
 			fprintf(fp, ".");
 	}

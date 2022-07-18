@@ -1094,8 +1094,10 @@ static int unmap_and_move(new_page_t get_new_page,
 	int rc = MIGRATEPAGE_SUCCESS;
 	struct page *newpage = NULL;
 
-	if (!thp_migration_supported() && PageTransHuge(page))
+	if (!thp_migration_supported() && PageTransHuge(page)) {
+		pr_info("thp migration not supported!");
 		return -ENOSYS;
+	}
 
 	if (page_count(page) == 1) {
 		/* page was freed from under us. So we are done. */
@@ -1119,7 +1121,7 @@ static int unmap_and_move(new_page_t get_new_page,
 		set_page_owner_migrate_reason(newpage, reason);
 
 out:
-	if (rc != -EAGAIN) {
+	if (rc != -EAGAIN && reason != MR_ETCOMPACTION) {
 		/*
 		 * A page that has been migrated has all references
 		 * removed and will be freed. A page that has not been
@@ -1143,7 +1145,7 @@ out:
 			mod_node_page_state(page_pgdat(page), NR_ISOLATED_ANON +
 					page_is_file_lru(page), -thp_nr_pages(page));
 
-		if (reason != MR_MEMORY_FAILURE)
+		if (reason != MR_MEMORY_FAILURE && reason != MR_ETCOMPACTION)
 			/*
 			 * We release the page in page_handle_poison.
 			 */
@@ -1422,7 +1424,9 @@ retry:
 			case -ENOSYS:
 				/* THP migration is unsupported */
 				if (is_thp) {
+					pr_info("migrating thp failed!");
 					nr_thp_failed++;
+					//if (reason != MR_ETCOMPACTION && !try_split_thp(page, &page2, &thp_split_pages)) {
 					if (!try_split_thp(page, &page2, &thp_split_pages)) {
 						nr_thp_split++;
 						goto retry;
@@ -1445,6 +1449,7 @@ retry:
 				 */
 				if (is_thp && !nosplit) {
 					nr_thp_failed++;
+					//if (reason != MR_ETCOMPACTION && !try_split_thp(page, &page2, &thp_split_pages)) {
 					if (!try_split_thp(page, &page2, &thp_split_pages)) {
 						nr_thp_split++;
 						goto retry;
@@ -1460,6 +1465,7 @@ retry:
 				goto out;
 			case -EAGAIN:
 				if (is_thp) {
+					pr_info("thp retry!");
 					thp_retry++;
 					break;
 				}
@@ -1468,6 +1474,7 @@ retry:
 			case MIGRATEPAGE_SUCCESS:
 				nr_succeeded += nr_subpages;
 				if (is_thp) {
+					pr_debug("thp success!");
 					nr_thp_succeeded++;
 					break;
 				}
@@ -1480,6 +1487,7 @@ retry:
 				 * retried in the next outer loop.
 				 */
 				if (is_thp) {
+					pr_info("thp failed!");
 					nr_thp_failed++;
 					nr_failed_pages += nr_subpages;
 					break;

@@ -24,6 +24,15 @@
 #include <asm/pgalloc.h>
 #include "internal.h"
 
+#ifdef CONFIG_HAWKEYE
+#include <linux/ohp.h>
+#endif /* CONFIG_HAWKEYE */
+
+#ifdef CONFIG_COALAPAGING
+#include "coalapaging/internal.h"
+#include <linux/coalapaging.h>
+#endif /* CONFIG_COALAPAGING */
+
 enum scan_result {
 	SCAN_FAIL,
 	SCAN_SUCCEED,
@@ -61,9 +70,24 @@ static DEFINE_MUTEX(khugepaged_mutex);
 
 /* default scan 8*512 pte (or vmas) every 30 second */
 static unsigned int khugepaged_pages_to_scan __read_mostly;
+
+static unsigned int max_thp_collapse_alloc __read_mostly = 1250000000;
+static atomic_t thp_collapse_alloc;
+
 static unsigned int khugepaged_pages_collapsed;
 static unsigned int khugepaged_full_scans;
 static unsigned int khugepaged_scan_sleep_millisecs __read_mostly = 10000;
+#ifdef CONFIG_HAWKEYE
+static unsigned int khugepaged_max_cpu __read_mostly = 0;
+static unsigned int khugepaged_min_sleep __read_mostly = 0;
+/*
+ * 0 - TLB overhead per pending promotion (Default).
+ * 1 - TLB overhead only.
+ */
+static unsigned int khugepaged_promotion_metric __read_mostly = 0;
+static unsigned int khugepaged_hwk_fallback __read_mostly = 0;
+#endif /* CONFIG_HAWKEYE */
+
 /* during fragmentation poll the hugepage allocator once every minute */
 static unsigned int khugepaged_alloc_sleep_millisecs __read_mostly = 60000;
 static unsigned long khugepaged_sleep_expire;
@@ -77,6 +101,11 @@ static DECLARE_WAIT_QUEUE_HEAD(khugepaged_wait);
 static unsigned int khugepaged_max_ptes_none __read_mostly;
 static unsigned int khugepaged_max_ptes_swap __read_mostly;
 static unsigned int khugepaged_max_ptes_shared __read_mostly;
+
+static bool khugepaged_enable __read_mostly = true;
+bool kcompactd_enable __read_mostly = true;
+
+static bool khugepaged_hwk __read_mostly = false;
 
 #define MM_SLOTS_HASH_BITS 10
 static __read_mostly DEFINE_HASHTABLE(mm_slots_hash, MM_SLOTS_HASH_BITS);
@@ -101,6 +130,7 @@ struct mm_slot {
 	/* pte-mapped THP in this mm */
 	int nr_pte_mapped_thp;
 	unsigned long pte_mapped_thp[MAX_PTE_MAPPED_THP];
+	unsigned long address;
 };
 
 /**
@@ -150,6 +180,101 @@ static struct kobj_attribute scan_sleep_millisecs_attr =
 	__ATTR(scan_sleep_millisecs, 0644, scan_sleep_millisecs_show,
 	       scan_sleep_millisecs_store);
 
+#ifdef CONFIG_HAWKEYE
+static ssize_t max_cpu_show(struct kobject *kobj, struct kobj_attribute *attr,
+								 char *buf)
+{
+	return sprintf(buf, "%u\n", khugepaged_max_cpu);
+}
+
+static ssize_t max_cpu_store(struct kobject *kobj, struct kobj_attribute *attr,
+					const char *buf, size_t count)
+{
+	unsigned long cpu;
+	int err;
+
+	err = kstrtoul(buf, 10, &cpu);
+	if (err || cpu < 0 || cpu > 100)
+		return -EINVAL;
+
+	khugepaged_max_cpu = cpu;
+	return count;
+}
+
+static struct kobj_attribute max_cpu_attr =
+	__ATTR(max_cpu, 0644, max_cpu_show, max_cpu_store);
+
+static ssize_t min_sleep_show(struct kobject *kobj, struct kobj_attribute *attr,
+								 char *buf)
+{
+	return sprintf(buf, "%u\n", khugepaged_min_sleep);
+}
+
+static ssize_t min_sleep_store(struct kobject *kobj, struct kobj_attribute *attr,
+					const char *buf, size_t count)
+{
+	unsigned long cpu;
+	int err;
+
+	err = kstrtoul(buf, 10, &cpu);
+	if (err || cpu < 0 || cpu > 100)
+		return -EINVAL;
+
+	khugepaged_min_sleep = cpu;
+	return count;
+}
+
+static struct kobj_attribute min_sleep_attr =
+	__ATTR(min_sleep, 0644, min_sleep_show, min_sleep_store);
+
+
+static ssize_t promotion_metric_show(struct kobject *kobj,
+			struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%u\n", khugepaged_promotion_metric);
+}
+
+static ssize_t promotion_metric_store(struct kobject *kobj,
+		struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	unsigned long metric;
+	int err;
+
+	err = kstrtoul(buf, 10, &metric);
+	if (err || metric < 0 || metric > 2)
+		return -EINVAL;
+
+	khugepaged_promotion_metric = metric;
+	return count;
+}
+
+static struct kobj_attribute promotion_metric_attr =
+	__ATTR(promotion_metric, 0644, promotion_metric_show, promotion_metric_store);
+
+static ssize_t hwk_fallback_show(struct kobject *kobj,
+			struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%u\n", khugepaged_hwk_fallback);
+}
+
+static ssize_t hwk_fallback_store(struct kobject *kobj,
+		struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	unsigned long metric;
+	int err;
+
+	err = kstrtoul(buf, 10, &metric);
+	if (err || metric < 0 || metric > 2)
+		return -EINVAL;
+
+	khugepaged_hwk_fallback = metric;
+	return count;
+}
+
+static struct kobj_attribute hwk_fallback_attr =
+	__ATTR(hwk_fallback, 0644, hwk_fallback_show, hwk_fallback_store);
+#endif /* CONFIG_HAWKEYE */
+
 static ssize_t alloc_sleep_millisecs_show(struct kobject *kobj,
 					  struct kobj_attribute *attr,
 					  char *buf)
@@ -174,9 +299,37 @@ static ssize_t alloc_sleep_millisecs_store(struct kobject *kobj,
 
 	return count;
 }
+
 static struct kobj_attribute alloc_sleep_millisecs_attr =
 	__ATTR(alloc_sleep_millisecs, 0644, alloc_sleep_millisecs_show,
 	       alloc_sleep_millisecs_store);
+
+static ssize_t max_thp_collapse_alloc_show(struct kobject *kobj,
+                                  struct kobj_attribute *attr,
+                                  char *buf)
+{
+        return sprintf(buf, "%u\n", max_thp_collapse_alloc);
+}
+
+static ssize_t max_thp_collapse_alloc_store(struct kobject *kobj,
+				   struct kobj_attribute *attr,
+				   const char *buf, size_t count)
+{
+	int err;
+	unsigned long pages;
+
+	err = kstrtoul(buf, 10, &pages);
+	if (err || !pages || pages > UINT_MAX)
+		return -EINVAL;
+
+	max_thp_collapse_alloc = pages + read_vm_event(THP_COLLAPSE_ALLOC);
+
+	return count;
+}
+
+static struct kobj_attribute max_thp_collapse_alloc_attr =
+	__ATTR(max_thp_collapse_alloc, 0644, max_thp_collapse_alloc_show,
+	       max_thp_collapse_alloc_store);
 
 static ssize_t pages_to_scan_show(struct kobject *kobj,
 				  struct kobj_attribute *attr,
@@ -209,8 +362,24 @@ static ssize_t pages_collapsed_show(struct kobject *kobj,
 {
 	return sysfs_emit(buf, "%u\n", khugepaged_pages_collapsed);
 }
+static ssize_t pages_collapsed_store(struct kobject *kobj,
+				   struct kobj_attribute *attr,
+				   const char *buf, size_t count)
+{
+	unsigned int pages;
+	int err;
+
+	err = kstrtouint(buf, 10, &pages);
+	if (err || pages)
+		return -EINVAL;
+
+	khugepaged_pages_collapsed = 0;
+
+	return count;
+}
 static struct kobj_attribute pages_collapsed_attr =
-	__ATTR_RO(pages_collapsed);
+	__ATTR(pages_collapsed, 0644, pages_collapsed_show,
+	       pages_collapsed_store);
 
 static ssize_t full_scans_show(struct kobject *kobj,
 			       struct kobj_attribute *attr,
@@ -218,8 +387,24 @@ static ssize_t full_scans_show(struct kobject *kobj,
 {
 	return sysfs_emit(buf, "%u\n", khugepaged_full_scans);
 }
+static ssize_t full_scans_store(struct kobject *kobj,
+				   struct kobj_attribute *attr,
+				   const char *buf, size_t count)
+{
+	unsigned int pages;
+	int err;
+
+	err = kstrtouint(buf, 10, &pages);
+	if (err || pages)
+		return -EINVAL;
+
+	khugepaged_full_scans = 0;
+
+	return count;
+}
 static struct kobj_attribute full_scans_attr =
-	__ATTR_RO(full_scans);
+	__ATTR(full_scans, 0644, full_scans_show,
+	       full_scans_store);
 
 static ssize_t khugepaged_defrag_show(struct kobject *kobj,
 				      struct kobj_attribute *attr, char *buf)
@@ -325,6 +510,83 @@ static struct kobj_attribute khugepaged_max_ptes_shared_attr =
 	__ATTR(max_ptes_shared, 0644, khugepaged_max_ptes_shared_show,
 	       khugepaged_max_ptes_shared_store);
 
+static ssize_t khugepaged_enable_show(struct kobject *kobj,
+				      struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", khugepaged_enable);
+}
+static ssize_t khugepaged_enable_store(struct kobject *kobj,
+				       struct kobj_attribute *attr,
+				       const char *buf, size_t count)
+{
+	int err;
+	unsigned long enable;
+
+	err  = kstrtoul(buf, 10, &enable);
+	if (err)
+		return -EINVAL;
+
+	khugepaged_enable = !!enable;
+
+	return count;
+}
+
+static struct kobj_attribute khugepaged_enable_attr =
+	__ATTR(khugepaged_enable, 0644, khugepaged_enable_show,
+	       khugepaged_enable_store);
+
+static ssize_t kcompactd_enable_show(struct kobject *kobj,
+				      struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", kcompactd_enable);
+}
+
+static ssize_t kcompactd_enable_store(struct kobject *kobj,
+				       struct kobj_attribute *attr,
+				       const char *buf, size_t count)
+{
+	int err;
+	unsigned long enable;
+
+	err  = kstrtoul(buf, 10, &enable);
+	if (err)
+		return -EINVAL;
+
+	kcompactd_enable = !!enable;
+
+	return count;
+}
+
+static struct kobj_attribute kcompactd_enable_attr =
+	__ATTR(kcompactd_enable, 0644, kcompactd_enable_show,
+	       kcompactd_enable_store);
+
+static ssize_t khugepaged_hwk_show(struct kobject *kobj,
+				      struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", khugepaged_hwk);
+}
+
+static ssize_t khugepaged_hwk_store(struct kobject *kobj,
+				       struct kobj_attribute *attr,
+				       const char *buf, size_t count)
+{
+	int err;
+	unsigned long enable;
+
+	err  = kstrtoul(buf, 10, &enable);
+	if (err)
+		return -EINVAL;
+
+	khugepaged_hwk = !!enable;
+
+	return count;
+}
+
+static struct kobj_attribute khugepaged_hwk_attr =
+	__ATTR(khugepaged_hwk, 0644, khugepaged_hwk_show,
+	       khugepaged_hwk_store);
+
 static struct attribute *khugepaged_attr[] = {
 	&khugepaged_defrag_attr.attr,
 	&khugepaged_max_ptes_none_attr.attr,
@@ -335,6 +597,16 @@ static struct attribute *khugepaged_attr[] = {
 	&full_scans_attr.attr,
 	&scan_sleep_millisecs_attr.attr,
 	&alloc_sleep_millisecs_attr.attr,
+	&max_thp_collapse_alloc_attr.attr,
+#ifdef CONFIG_HAWKEYE
+	&max_cpu_attr.attr,
+	&min_sleep_attr.attr,
+	&promotion_metric_attr.attr,
+	&hwk_fallback_attr.attr,
+#endif /* CONFIG_HAWKEYE */
+	&khugepaged_enable_attr.attr,
+	&kcompactd_enable_attr.attr,
+	&khugepaged_hwk_attr.attr,
 	NULL,
 };
 
@@ -634,6 +906,21 @@ static int __collapse_huge_page_isolate(struct vm_area_struct *vma,
 
 		VM_BUG_ON_PAGE(!PageAnon(page), page);
 
+#ifdef CONFIG_COALAPAGING
+		if (coala_hints_enabled(vma->vm_mm) && pte_cont(pteval)) {
+			struct coala_hint hint; 
+
+			hint = coala_get_hint(vma->vm_mm, address);
+			
+			if (hint.val == COALA_HINT_64K) {
+				pr_crit("wtf isolate cont");
+				coala_clear_khugepaged_mark(vma->vm_mm, address,
+						COALA_HINT_64K); 
+				goto out;
+			}
+		}
+#endif /* CONFIG_COALAPAGING */
+
 		if (page_mapcount(page) > 1 &&
 				++shared > khugepaged_max_ptes_shared) {
 			result = SCAN_EXCEED_SHARED_PTE;
@@ -706,6 +993,12 @@ next:
 		    page_is_young(page) || PageReferenced(page) ||
 		    mmu_notifier_test_young(vma->vm_mm, address))
 			referenced++;
+
+#ifdef CONFIG_COALAPAGING
+		if (coala_hints_enabled(vma->vm_mm)) {
+			referenced++;
+		}
+#endif /* CONFIG_COALAPAGING */
 
 		if (pte_write(pteval))
 			writable = true;
@@ -865,7 +1158,12 @@ khugepaged_alloc_page(struct page **hpage, gfp_t gfp, int node)
 {
 	VM_BUG_ON_PAGE(*hpage, *hpage);
 
-	*hpage = __alloc_pages_node(node, gfp, HPAGE_PMD_ORDER);
+	if (!khugepaged_hwk || atomic_read(&thp_collapse_alloc) < max_thp_collapse_alloc) {
+		*hpage = __alloc_pages_node(node, gfp, HPAGE_PMD_ORDER);
+	} else {
+		*hpage = NULL;
+	}
+
 	if (unlikely(!*hpage)) {
 		count_vm_event(THP_COLLAPSE_ALLOC_FAILED);
 		*hpage = ERR_PTR(-ENOMEM);
@@ -874,9 +1172,10 @@ khugepaged_alloc_page(struct page **hpage, gfp_t gfp, int node)
 
 	prep_transhuge_page(*hpage);
 	count_vm_event(THP_COLLAPSE_ALLOC);
+	atomic_inc(&thp_collapse_alloc);
 	return *hpage;
 }
-#else
+#else /* CONFIG_NUMA */
 static int khugepaged_find_target_node(void)
 {
 	return 0;
@@ -1040,7 +1339,7 @@ static bool __collapse_huge_page_swapin(struct mm_struct *mm,
 	return true;
 }
 
-static void collapse_huge_page(struct mm_struct *mm,
+static int collapse_huge_page(struct mm_struct *mm,
 				   unsigned long address,
 				   struct page **hpage,
 				   int node, int referenced, int unmapped)
@@ -1069,6 +1368,7 @@ static void collapse_huge_page(struct mm_struct *mm,
 	 */
 	mmap_read_unlock(mm);
 	new_page = khugepaged_alloc_page(hpage, gfp, node);
+
 	if (!new_page) {
 		result = SCAN_ALLOC_HUGE_PAGE_FAIL;
 		goto out_nolock;
@@ -1192,6 +1492,18 @@ static void collapse_huge_page(struct mm_struct *mm,
 
 	*hpage = NULL;
 
+#ifdef CONFIG_COALAPAGING
+	if (coala_hints_enabled(vma->vm_mm)) {
+		coala_clear_khugepaged_mark(vma->vm_mm, address, COALA_HINT_2M);
+	}
+
+	if (!coala_hints_enabled(vma->vm_mm) || coala_get_hint(vma->vm_mm, address).val == ULONG_MAX) {
+		pr_debug("increasing collapsed!");
+	} else {
+		pr_debug("coala 2m increased collapsed!");
+	}
+#endif /* CONFIG_COALAPAGING */
+
 	khugepaged_pages_collapsed++;
 	result = SCAN_SUCCEED;
 out_up_write:
@@ -1200,15 +1512,18 @@ out_nolock:
 	if (!IS_ERR_OR_NULL(*hpage))
 		mem_cgroup_uncharge(page_folio(*hpage));
 	trace_mm_collapse_huge_page(mm, isolated, result);
-	return;
+	return !!new_page;
 }
+
+#ifdef CONFIG_COALAPAGING
+#include "coalapaging/khugepaged.h"
+#endif /* CONFIG_COALAPAGING */
 
 static int khugepaged_scan_pmd(struct mm_struct *mm,
 			       struct vm_area_struct *vma,
 			       unsigned long address,
-			       struct page **hpage)
-{
-	pmd_t *pmd;
+			       struct page **hpage) {
+	pmd_t *pmd = NULL;
 	pte_t *pte, *_pte;
 	int ret = 0, result = 0, referenced = 0;
 	int none_or_zero = 0, shared = 0;
@@ -1242,6 +1557,7 @@ static int khugepaged_scan_pmd(struct mm_struct *mm,
 					result = SCAN_PTE_UFFD_WP;
 					goto out_unmap;
 				}
+
 				continue;
 			} else {
 				result = SCAN_EXCEED_SWAP_PTE;
@@ -1259,6 +1575,7 @@ static int khugepaged_scan_pmd(struct mm_struct *mm,
 				goto out_unmap;
 			}
 		}
+
 		if (pte_uffd_wp(pteval)) {
 			/*
 			 * Don't collapse the page if any of the small
@@ -1274,6 +1591,21 @@ static int khugepaged_scan_pmd(struct mm_struct *mm,
 		}
 		if (pte_write(pteval))
 			writable = true;
+
+#ifdef CONFIG_COALAPAGING
+		if (coala_hints_enabled(vma->vm_mm) && pte_cont(pteval)) {
+			struct coala_hint hint;
+
+			hint = coala_get_hint(vma->vm_mm, address);
+			
+			if (hint.val == COALA_HINT_64K) {
+				pr_crit("wtf isolate cont 2");
+				coala_clear_khugepaged_mark(vma->vm_mm, _address,
+						COALA_HINT_64K); 
+				goto out_unmap;
+			}
+		}
+#endif /* CONFIG_COALAPAGING */
 
 		page = vm_normal_page(vma, _address, pteval);
 		if (unlikely(!page)) {
@@ -1340,6 +1672,12 @@ static int khugepaged_scan_pmd(struct mm_struct *mm,
 		    page_is_young(page) || PageReferenced(page) ||
 		    mmu_notifier_test_young(vma->vm_mm, address))
 			referenced++;
+
+#ifdef CONFIG_COALAPAGING
+		if (coala_hints_enabled(vma->vm_mm)) {
+			referenced++;
+		}
+#endif /* CONFIG_COALAPAGING */
 	}
 	if (!writable) {
 		result = SCAN_PAGE_RO;
@@ -1351,16 +1689,31 @@ static int khugepaged_scan_pmd(struct mm_struct *mm,
 	}
 out_unmap:
 	pte_unmap_unlock(pte, ptl);
+
+#ifdef CONFIG_COALAPAGING
+	if (!ret && (hpage == COALA_SCANONLY || coala_get_hint(mm, address).val == COALA_HINT_32M)) {
+		pr_debug("2m collapse failed with %d", result);
+	}
+
+	if (hpage == COALA_SCANONLY) {
+		return ret;
+	}
+#endif /* CONFIG_COALAPAGING */
+
 	if (ret) {
 		node = khugepaged_find_target_node();
 		/* collapse_huge_page will return with the mmap_lock released */
-		collapse_huge_page(mm, address, hpage, node,
-				referenced, unmapped);
+
+		ret = 1 + collapse_huge_page(mm, address, hpage, node, referenced,
+				unmapped);
+		trace_mm_khugepaged_scan_pmd(mm, page, writable, referenced,
+						 none_or_zero, result, unmapped);
+		return ret;
 	}
 out:
 	trace_mm_khugepaged_scan_pmd(mm, page, writable, referenced,
 				     none_or_zero, result, unmapped);
-	return ret;
+	return 0;
 }
 
 static void collect_mm_slot(struct mm_slot *mm_slot)
@@ -2084,6 +2437,111 @@ static void khugepaged_collapse_pte_mapped_thps(struct mm_slot *mm_slot)
 }
 #endif
 
+#ifdef CONFIG_HAWKEYE
+/*
+ * This is parallel to khugepage_scan_mm_slot but selects
+ * pages to be promoted from opportunistice huge page framework.
+ * Make sure it does not affect the correctness and we release
+ * all khugepaged resources when a process exits.
+ * Ideally, khugepaged should be completely replaced by ohp.
+ */
+#define OHP_NO_WORK	99999
+static unsigned int ohp_scan_mm(struct mm_struct *mm,
+			unsigned int pages, struct page **hpage)
+{
+	struct vm_area_struct *vma;
+	struct ohp_addr *kaddr;
+	unsigned long address;
+	int progress = 0, failed = 0, ret;
+
+	VM_BUG_ON(!pages);
+
+	/*
+	 * Each iteration will acquire and release the mmap semaphore
+	 * independently. This may look messy but keeps the code simple.
+	 */
+	while (progress < pages && failed < 100) {
+		/*
+		 * 0 - overhead only.
+		 * 1 - overhead per GB memory.
+		 * 2 - global, round-robin policy.
+		 */
+		if (khugepaged_promotion_metric < 2)
+			kaddr = get_ohp_mm_addr(mm);
+		else
+			kaddr = get_ohp_global_kaddr(&mm);
+
+		if (!kaddr) {
+			pr_debug("no kaddr");
+			return OHP_NO_WORK;
+		}
+
+		address = kaddr->address;
+
+		mmap_read_lock(mm);
+		if (unlikely(khugepaged_test_exit(mm)))
+			vma = NULL;
+		else
+			vma = find_vma(mm, address);
+
+		if (!vma) {
+			failed += 1;
+			mmap_read_unlock(mm);
+			ohp_putback_kaddr(mm, kaddr);
+			continue;
+		}
+
+		if (!(address >= vma->vm_start && address < vma->vm_end)) {
+			failed += 1;
+			mmap_read_unlock(mm);
+			ohp_putback_kaddr(mm, kaddr);
+			continue;
+		}
+
+		if (!hugepage_vma_check(vma, vma->vm_flags)) {
+			failed += 1;
+			mmap_read_unlock(mm);
+			ohp_putback_kaddr(mm, kaddr);
+			continue;
+		}
+
+		/* Check for alignment. */
+		VM_BUG_ON(address & ~HPAGE_PMD_MASK);
+
+		/* promote into a huge page.
+		 * Total two return values are possible.
+		 * 0 - semaphore must be released.
+		 * 1 - semaphore has been released but promotion failed
+		 *     due to huge page allocation failure.
+		 * 2 - semaphore has been released and promotion succeded.
+		 */
+		ret = khugepaged_scan_pmd(mm, vma, address, hpage);
+		/* mmap sem already released. */
+		if (ret == 2) {
+			pr_debug("promoted");
+			progress += HPAGE_PMD_NR;
+			kfree(kaddr);
+		}
+		else if (ret == 1) {
+			failed += 100;
+			ohp_putback_kaddr(mm, kaddr);
+			count_vm_event(OHP_PROMOTE_FAILED);
+			pr_debug("alloc failed %d", failed);
+		}
+		else {
+			pr_debug("failed");
+			failed += 1;
+			/* Give it another chance. */
+			ohp_putback_kaddr(mm, kaddr);
+			/* release and require */
+			mmap_read_unlock(mm);
+		}
+	}
+
+	return progress;
+}
+#endif /* CONFIG_HAWKEYE */
+
 static unsigned int khugepaged_scan_mm_slot(unsigned int pages,
 					    struct page **hpage)
 	__releases(&khugepaged_mm_lock)
@@ -2093,6 +2551,7 @@ static unsigned int khugepaged_scan_mm_slot(unsigned int pages,
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
 	int progress = 0;
+	unsigned long nr = 1;
 
 	VM_BUG_ON(!pages);
 	lockdep_assert_held(&khugepaged_mm_lock);
@@ -2102,20 +2561,71 @@ static unsigned int khugepaged_scan_mm_slot(unsigned int pages,
 	else {
 		mm_slot = list_entry(khugepaged_scan.mm_head.next,
 				     struct mm_slot, mm_node);
-		khugepaged_scan.address = 0;
 		khugepaged_scan.mm_slot = mm_slot;
 	}
+	khugepaged_scan.address = mm_slot->address;
 	spin_unlock(&khugepaged_mm_lock);
+
+	vma = NULL;
+	mm = mm_slot->mm;
+
+#ifdef CONFIG_COALAPAGING
+	if (coala_khugepaged_skip_mm(mm)) {
+		goto breakouterloop_mmap_lock;
+	}
+
+	if (mm->owner && mm->owner->comm) {
+		pr_debug("mm 0x%lx (%s), addr: 0x%lx", (unsigned long)mm, mm->owner->comm,
+				khugepaged_scan.address);
+	}
+
+	if (coala_hints_enabled(mm) &&
+		(!coala_khuge_fallback || coala_hints_khuge(mm))) {
+		bool ret;
+		struct timespec64 t0, t1;
+
+		ktime_get_ts64(&t0);
+		ret = coala_khugepaged_scan_mm(mm, &vma, pages, hpage, &progress);
+		ktime_get_ts64(&t1);
+
+		pr_debug("promotion time: %lld msecs",
+				(t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000);
+
+		if (ret) {
+			if (progress < pages) {
+				pr_debug("coala fallback 1 0x%lx", (unsigned long)mm);
+				goto fallback;
+			}
+			goto breakouterloop;
+		} else {
+			goto breakouterloop_mmap_lock;
+		}
+	}
+
+	if (mm->owner && mm->owner->comm) {
+		if (mm->et_enabled) {
+			if (coala_hints_enabled(mm)) {
+				pr_debug("coala fallback 0x%lx %s", (unsigned long)mm, mm->owner->comm);
+			} else {
+				pr_debug("coala etheap async 0x%lx %s", (unsigned long)mm, mm->owner->comm);
+			}
+		} else {
+			pr_debug("noncoala 0x%lx %s", (unsigned long)mm, mm->owner->comm);
+		}
+	}
+#endif /* CONFIG_COALAPAGING */
+
 	khugepaged_collapse_pte_mapped_thps(mm_slot);
 
-	mm = mm_slot->mm;
 	/*
 	 * Don't wait for semaphore (to avoid long wait times).  Just move to
 	 * the next mm on the list.
 	 */
-	vma = NULL;
-	if (unlikely(!mmap_read_trylock(mm)))
+	if (unlikely(!mmap_read_trylock(mm))) {
 		goto breakouterloop_mmap_lock;
+	}
+
+fallback:
 	if (likely(!khugepaged_test_exit(mm)))
 		vma = find_vma(mm, khugepaged_scan.address);
 
@@ -2164,18 +2674,75 @@ skip:
 				khugepaged_scan_file(mm, file, pgoff, hpage);
 				fput(file);
 			} else {
+#ifdef CONFIG_COALAPAGING
+				if (!coala_hints_enabled(mm)) {
+					ret = 0;
+					if (coala_khuge_etheap_async && mm->et_enabled &&
+						IS_ALIGNED(khugepaged_scan.address, CONT_PMD_SIZE)) {
+						bool cont = false;
+						pr_debug("etheap: trying to promote 0x%lx",
+								khugepaged_scan.address);
+						ret = coala_khugepaged_scan_contpmd(mm, vma, 
+								khugepaged_scan.address, hpage, &cont);
+						if (cont) {
+							pr_debug("0x%lx already cont",
+									khugepaged_scan.address);
+						}
+						nr = CONT_PMDS;
+
+						if (!IS_ERR_OR_NULL(*hpage)) {
+							pr_info("freeing contpmd page");
+							coala_khugepaged_free(*hpage);
+							*hpage = NULL;
+						}
+					}
+
+					if (!ret) {
+						ret = khugepaged_scan_pmd(mm, vma,
+								khugepaged_scan.address,
+								hpage);
+						nr = 1;
+					}
+				} else {
+					struct coala_hint hint; 
+					hint = coala_get_hint(vma->vm_mm, khugepaged_scan.address);
+					if ((hint.val != ULONG_MAX) && (hint.val < COALA_HINT_64K)) {
+						ret = khugepaged_scan_pmd(mm, vma,
+								khugepaged_scan.address,
+								hpage);
+					}
+				}
+#else /* CONFIG_COALAPAGING */
 				ret = khugepaged_scan_pmd(mm, vma,
 						khugepaged_scan.address,
 						hpage);
+#endif /* CONFIG_COALAPAGING */
 			}
+
 			/* move to next address */
-			khugepaged_scan.address += HPAGE_PMD_SIZE;
-			progress += HPAGE_PMD_NR;
-			if (ret)
+			khugepaged_scan.address += nr * HPAGE_PMD_SIZE;
+			if (!khugepaged_hwk) {
+				progress += nr * HPAGE_PMD_NR;
+			}
+
+			if (ret) {
+				if (khugepaged_hwk && ret == 2) {
+					progress += nr * HPAGE_PMD_NR;
+				}
+
+#ifdef CONFIG_COALAPAGING
+				if (mm->et_enabled) {
+					pr_debug("progress: %d, next: 0x%lx", progress,
+							khugepaged_scan.address);
+				}
+#endif
+
 				/* we released mmap_lock so break loop */
 				goto breakouterloop_mmap_lock;
-			if (progress >= pages)
+			}
+			if (progress >= pages) {
 				goto breakouterloop;
+			}
 		}
 	}
 breakouterloop:
@@ -2184,11 +2751,20 @@ breakouterloop_mmap_lock:
 
 	spin_lock(&khugepaged_mm_lock);
 	VM_BUG_ON(khugepaged_scan.mm_slot != mm_slot);
+	mm_slot->address = khugepaged_scan.address;
 	/*
 	 * Release the current mm_slot if this mm is about to die, or
 	 * if we scanned all vmas of this mm.
 	 */
+#ifdef CONFIG_COALAPAGING
+	if (khugepaged_test_exit(mm) || !vma || coala_khuge_rr) {
+#else
 	if (khugepaged_test_exit(mm) || !vma) {
+#endif
+		if (!vma) {
+			mm_slot->address = 0;
+		}
+
 		/*
 		 * Make sure that if mm_users is reaching zero while
 		 * khugepaged runs here, khugepaged_exit will find
@@ -2198,7 +2774,6 @@ breakouterloop_mmap_lock:
 			khugepaged_scan.mm_slot = list_entry(
 				mm_slot->mm_node.next,
 				struct mm_slot, mm_node);
-			khugepaged_scan.address = 0;
 		} else {
 			khugepaged_scan.mm_slot = NULL;
 			khugepaged_full_scans++;
@@ -2212,8 +2787,12 @@ breakouterloop_mmap_lock:
 
 static int khugepaged_has_work(void)
 {
+#ifdef CONFIG_HAWKEYE
+	return ohp_has_work();
+#else /* CONFIG_HAWKEYE */
 	return !list_empty(&khugepaged_scan.mm_head) &&
 		khugepaged_enabled();
+#endif /* CONFIG_HAWKEYE */
 }
 
 static int khugepaged_wait_event(void)
@@ -2245,8 +2824,7 @@ static void khugepaged_do_scan(void)
 			pass_through_head++;
 		if (khugepaged_has_work() &&
 		    pass_through_head < 2)
-			progress += khugepaged_scan_mm_slot(pages - progress,
-							    &hpage);
+			progress += khugepaged_scan_mm_slot(pages - progress, &hpage);
 		else
 			progress = pages;
 		spin_unlock(&khugepaged_mm_lock);
@@ -2256,12 +2834,109 @@ static void khugepaged_do_scan(void)
 		put_page(hpage);
 }
 
+#ifdef CONFIG_HAWKEYE
+static void khugepaged_promote_mm(struct mm_struct *mm)
+{
+	struct page *hpage = NULL;
+	unsigned int progress = 0, pass_through_head = 0;
+	unsigned int pages = READ_ONCE(khugepaged_pages_to_scan);
+	unsigned int ret;
+	bool wait = true, fallback = false;
+
+	lru_add_drain_all();
+
+	while (progress < pages) {
+		if (!khugepaged_prealloc_page(&hpage, &wait)) {
+			pr_debug("prealloc failed");
+			break;
+		}
+
+		cond_resched();
+
+		if (unlikely(kthread_should_stop() || try_to_freeze())) {
+			pr_debug("should stop?");
+			break;
+		}
+
+		spin_lock(&khugepaged_mm_lock);
+		if (!fallback || !khugepaged_scan.mm_slot) {
+			pass_through_head++;
+			pr_debug("pass_through_head: %d", pass_through_head);
+		}
+
+		if (khugepaged_has_work() && pass_through_head < 2) {
+			if (fallback) {
+				pr_debug("falling back");
+				progress += khugepaged_scan_mm_slot(pages - progress, &hpage);
+			} else {
+				spin_unlock(&khugepaged_mm_lock);
+				ret = ohp_scan_mm(mm, pages-progress, &hpage);
+				if (ret != OHP_NO_WORK) {
+					progress += ret;
+				} else {
+					/*
+					 * If there is no work to be done, we can
+					 * safely put khugepaged to sleep.
+					 */
+					pr_debug("no work");
+
+					//progress = pages;
+					//goto out;
+					if (khugepaged_hwk_fallback) {
+						pass_through_head = 0;
+						fallback = true;
+					}
+				}
+				continue;
+			}
+		} else {
+			pr_debug("exiting promote_mm, bins: %d, passthrough: %d",
+					ohp_has_work(), pass_through_head);
+			progress = pages;
+		}
+		spin_unlock(&khugepaged_mm_lock);
+	}
+
+	if (!IS_ERR_OR_NULL(hpage))
+		put_page(hpage);
+}
+#endif /* CONFIG_HAWKEYE */
+
 static bool khugepaged_should_wakeup(void)
 {
 	return kthread_should_stop() ||
 	       time_after_eq(jiffies, khugepaged_sleep_expire);
 }
 
+#ifdef CONFIG_HAWKEYE
+static void ohp_sleep_iteration(unsigned long busy_msecs,
+					unsigned long sleep_msecs)
+{
+	long idle_msecs;
+
+	/* Check if khugepaged is bounded by the cpu utilization. */
+	if (khugepaged_max_cpu == 0) {
+		const unsigned long scan_sleep_jiffies =
+			msecs_to_jiffies(khugepaged_scan_sleep_millisecs);
+
+		khugepaged_sleep_expire = jiffies + scan_sleep_jiffies;
+		wait_event_freezable_timeout(khugepaged_wait,
+					     khugepaged_should_wakeup(),
+					     scan_sleep_jiffies);
+		return;
+	}
+
+	/* Adjust sleep interval. */
+	idle_msecs = (busy_msecs * 100) / khugepaged_max_cpu;
+
+	/* Sleep for atlest the user provided time period.*/
+	if (idle_msecs < khugepaged_min_sleep)
+		idle_msecs = khugepaged_min_sleep;
+
+	wait_event_freezable_timeout(khugepaged_wait, kthread_should_stop(),
+				msecs_to_jiffies((unsigned long)idle_msecs));
+}
+#else /* !CONFIG_HAWKEYE */
 static void khugepaged_wait_work(void)
 {
 	if (khugepaged_has_work()) {
@@ -2281,6 +2956,7 @@ static void khugepaged_wait_work(void)
 	if (khugepaged_enabled())
 		wait_event_freezable(khugepaged_wait, khugepaged_wait_event());
 }
+#endif /* CONFIG_HAWKEYE */
 
 static int khugepaged(void *none)
 {
@@ -2290,8 +2966,37 @@ static int khugepaged(void *none)
 	set_user_nice(current, MAX_NICE);
 
 	while (!kthread_should_stop()) {
-		khugepaged_do_scan();
+#ifdef CONFIG_HAWKEYE
+		struct mm_struct *mm = NULL;
+		struct timespec64 t0, t1;
+		unsigned long promotion_msecs = 0, wait_msecs = 0;
+
+		/*
+		 * For a generic policy, we don't need to select the mm
+		 * apriori. It will be handled by ohp_scan_mm in the
+		 * round-robin fashion.
+		 */
+		if (khugepaged_promotion_metric < 2) {
+			/* select target mm */
+			mm = ohp_get_target_mm(khugepaged_promotion_metric);
+			if (!mm)
+				goto do_wait;
+		}
+
+		ktime_get_ts64(&t0);
+		khugepaged_promote_mm(mm);
+		ktime_get_ts64(&t1);
+		promotion_msecs = get_time_difference(&t0, &t1);
+		pr_debug("promotion time: %ld msecs", promotion_msecs);
+do_wait:
+		/* Give khugepaged a break. */
+		ohp_sleep_iteration(promotion_msecs, wait_msecs);
+#else /* !CONFIG_HAWKEYE */
+		if (khugepaged_enable) {
+			khugepaged_do_scan();
+		}
 		khugepaged_wait_work();
+#endif /* CONFIG_HAWKEYE */
 	}
 
 	spin_lock(&khugepaged_mm_lock);
@@ -2302,6 +3007,15 @@ static int khugepaged(void *none)
 	spin_unlock(&khugepaged_mm_lock);
 	return 0;
 }
+
+#ifdef CONFIG_HAWKEYE
+struct page *follow_page_custom(struct vm_area_struct *vma,
+                unsigned long addr, unsigned int foll_flags)
+{
+	return follow_page(vma, addr, foll_flags);
+}
+EXPORT_SYMBOL(follow_page_custom);
+#endif /* CONFIG_HAWKEYE */
 
 static void set_recommended_min_free_kbytes(void)
 {

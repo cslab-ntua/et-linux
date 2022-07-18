@@ -792,9 +792,11 @@ static inline int pmd_protnone(pmd_t pmd)
 
 static inline int pmd_none(pmd_t pmd)
 {
+	unsigned long val;
+
 	/* Only check low word on 32-bit platforms, since it might be
 	   out of sync with upper half. */
-	unsigned long val = native_pmd_val(pmd);
+	val = native_pmd_val(pmd);
 	return (val & ~_PAGE_KNL_ERRATUM_MASK) == 0;
 }
 

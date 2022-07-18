@@ -158,11 +158,17 @@ static int trace_event_printer(enum binary_printer_ops op,
 
 	switch (op) {
 	case BINARY_PRINT_DATA_BEGIN:
+		if (getenv("DUMP")) {
+			break;
+		}
 		printed += fprintf(fp, ".");
 		printed += color_fprintf(fp, color, "\n. ... raw event: size %d bytes\n",
 					 event->header.size);
 		break;
 	case BINARY_PRINT_LINE_BEGIN:
+		if (getenv("DUMP")) {
+			break;
+		}
 		printed += fprintf(fp, ".");
 		break;
 	case BINARY_PRINT_ADDR:
@@ -178,6 +184,9 @@ static int trace_event_printer(enum binary_printer_ops op,
 		printed += color_fprintf(fp, color, "  ");
 		break;
 	case BINARY_PRINT_CHAR_DATA:
+		if (getenv("DUMP")) {
+			break;
+		}
 		printed += color_fprintf(fp, color, "%c",
 			      isprint(ch) && isascii(ch) ? ch : '.');
 		break;

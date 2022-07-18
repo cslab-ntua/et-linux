@@ -909,6 +909,27 @@ config ANON_VMA_NAME
 	  area from being merged with adjacent virtual memory areas due to the
 	  difference in their name.
 
+config COALAPAGING
+	bool "Coalescing-aware CAPaging"
+	depends on TRANSPARENT_HUGEPAGE
+
+	help
+	  Stripped down CAPaging for SW-assisted TLB coalescing"
+
+config PFTRACE
+	bool "Fault latency tracing"
+	depends on TRACEPOINTS
+
+	help
+	  Enable page-fault latency tracepoints (for both vanilla and CA paths)
+
+config HAWKEYE 
+	bool "Enable Hawkeye (OHP)"
+	depends on TRANSPARENT_HUGEPAGE
+
+	help
+	  Enable Hawkeye THP optimizations (OHP)
+
 source "mm/damon/Kconfig"
 
 endmenu

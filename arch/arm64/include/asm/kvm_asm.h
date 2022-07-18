@@ -76,6 +76,7 @@ enum __kvm_host_smccc_func {
 	__KVM_HOST_SMCCC_FUNC___vgic_v3_save_aprs,
 	__KVM_HOST_SMCCC_FUNC___vgic_v3_restore_aprs,
 	__KVM_HOST_SMCCC_FUNC___pkvm_vcpu_init_traps,
+	__KVM_HOST_SMCCC_FUNC___kvm_tlb_flush_range,
 };
 
 #define DECLARE_KVM_VHE_SYM(sym)	extern char sym[]
@@ -206,6 +207,13 @@ extern void __kvm_flush_cpu_context(struct kvm_s2_mmu *mmu);
 extern void __kvm_tlb_flush_vmid_ipa(struct kvm_s2_mmu *mmu, phys_addr_t ipa,
 				     int level);
 extern void __kvm_tlb_flush_vmid(struct kvm_s2_mmu *mmu);
+#ifdef CONFIG_HAVE_ARCH_ELASTIC_TRANSLATIONS
+/*
+ * __tcr_flush_tlb_range() adapted for KVM
+ */
+extern void __kvm_tlb_flush_range(struct kvm_s2_mmu *mmu, phys_addr_t ipa,
+					int level);
+#endif /* CONFIG_HAVE_ARCH_ELASTIC_TRANSLATIONS */
 
 extern void __kvm_timer_set_cntvoff(u64 cntvoff);
 

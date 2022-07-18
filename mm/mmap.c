@@ -54,6 +54,10 @@
 #include <asm/tlb.h>
 #include <asm/mmu_context.h>
 
+#ifdef CONFIG_HAWKEYE
+#include <linux/ohp.h>
+#endif /* CONFIG_HAWKEYE */
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/mmap.h>
 
@@ -186,6 +190,9 @@ static struct vm_area_struct *remove_vma(struct vm_area_struct *vma)
 	if (vma->vm_file)
 		fput(vma->vm_file);
 	mpol_put(vma_policy(vma));
+#ifdef CONFIG_HAWKEYE
+	remove_ohp_bins(vma);
+#endif /* CONFIG_HAWKEYE */
 	vm_area_free(vma);
 	return next;
 }

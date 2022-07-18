@@ -886,8 +886,16 @@ __SYSCALL(__NR_futex_waitv, sys_futex_waitv)
 #define __NR_set_mempolicy_home_node 450
 __SYSCALL(__NR_set_mempolicy_home_node, sys_set_mempolicy_home_node)
 
+#ifdef CONFIG_HAWKEYE
+#define __NR_update_mm_ohp_stats 451
+__SYSCALL(__NR_update_mm_ohp_stats, sys_update_mm_ohp_stats)
+
+#undef __NR_syscalls
+#define __NR_syscalls 452
+#else /* !CONFIG_HAWKEYE */
 #undef __NR_syscalls
 #define __NR_syscalls 451
+#endif /* CONFIG_HAWKEYE */
 
 /*
  * 32 bit systems traditionally used different

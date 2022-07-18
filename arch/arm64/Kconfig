@@ -1215,6 +1215,16 @@ config CPU_LITTLE_ENDIAN
 
 endchoice
 
+config ARM64_ELASTIC_TRANSLATIONS
+	bool "ARM64 Elastic Translations"
+	default n
+	depends on COALAPAGING
+	select HAVE_ARCH_ELASTIC_TRANSLATIONS
+	help
+	  Say Y to enable the use of the contiguous translation descriptor bit
+	  in order transparently coalesce contiguous translation entries
+	  (PTEs, PMDs).
+
 config SCHED_MC
 	bool "Multi-core scheduler support"
 	help
@@ -1381,7 +1391,8 @@ config XEN
 	  Say Y if you want to run Linux in a Virtual Machine on Xen on ARM64.
 
 config FORCE_MAX_ZONEORDER
-	int
+	int "MAX_ORDER limit"
+	default "14" if COALAPAGING
 	default "14" if ARM64_64K_PAGES
 	default "12" if ARM64_16K_PAGES
 	default "11"

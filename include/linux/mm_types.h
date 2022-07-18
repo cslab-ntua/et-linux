@@ -8,6 +8,7 @@
 #include <linux/kref.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
+#include <linux/mutex.h>
 #include <linux/rbtree.h>
 #include <linux/rwsem.h>
 #include <linux/completion.h>
@@ -470,9 +471,55 @@ struct vm_area_struct {
 	struct mempolicy *vm_policy;	/* NUMA policy for the VMA */
 #endif
 	struct vm_userfaultfd_ctx vm_userfaultfd_ctx;
+
 } __randomize_layout;
 
 struct kioctx_table;
+
+#ifdef CONFIG_HAWKEYE
+/*
+ * Basic declarations for opportunistic huge page
+ * framework. We have 3 bins for managing huge page regions.
+ * List 3 is used to hold active huge page candidates. Rest two
+ * (i.e., list 0 and 1) are used to hold inactive pages and pages yet
+ * to be scanned.
+ */
+
+#define MAX_BINS	12
+
+struct ohp_addr {
+	struct mm_struct *mm;
+	struct list_head entry;
+	unsigned long address;
+	unsigned int weight;
+	unsigned int nr_scans;
+};
+
+struct ohp {
+	struct mutex		lock;
+	struct list_head	priority[MAX_BINS];
+	unsigned long		count[MAX_BINS];
+	unsigned long		ohp_remaining;
+	unsigned long		invalid; /* Debugging */
+	unsigned long		tstamp;
+	unsigned int		ohp_weight;
+	unsigned int		current_scan_idx;
+	unsigned int		nr_scans;
+};
+#endif /* CONFIG_HAWKEYE */
+
+#ifdef CONFIG_COALAPAGING
+struct coala_hints_struct {
+	void *hints;	/* xarray */
+	unsigned long *index;
+	unsigned long epoch;
+
+	atomic64_t contptes;
+	atomic64_t pmds;
+	atomic64_t contpmds;
+};
+#endif /* CONFIG_COALAPAGING */
+
 struct mm_struct {
 	struct {
 		struct vm_area_struct *mmap;		/* list of VMAs */
@@ -656,6 +703,23 @@ struct mm_struct {
 		u32 pasid;
 #endif
 	} __randomize_layout;
+
+#ifdef CONFIG_COALAPAGING
+	/* coalapging enable-toggle for this mm */
+	bool coalapaging;
+	/* pagesize hints */
+	struct coala_hints_struct coala_hints;
+#endif /* CONFIG_COALAPAGING */
+
+#ifdef CONFIG_HAVE_ARCH_ELASTIC_TRANSLATIONS
+	bool et_enabled;
+	struct et_batch *ebc;
+#endif /* CONFIG_HAVE_ARCH_ELASTIC_TRANSLATIONS */
+
+#ifdef CONFIG_HAWKEYE
+	struct list_head ohp_list;
+	struct ohp ohp;
+#endif /* CONFIG_HAWKEYE */
 
 	/*
 	 * The mm_cpumask needs to be at the end of mm_struct, because it

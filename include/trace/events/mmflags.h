@@ -101,6 +101,20 @@
 #define IF_HAVE_PG_SKIP_KASAN_POISON(flag,string)
 #endif
 
+#ifdef CONFIG_COALAPAGING
+#define IF_HAVE_PG_PCPLOCKED(flag,string) ,{1UL << flag, string}
+#define IF_HAVE_PG_LESHY(flag,string) ,{1UL << flag, string}
+#else
+#define IF_HAVE_PG_PCPLOCKED(flag,string)
+#define IF_HAVE_PG_LESHY(flag,string)
+#endif /* CONFIG_COALAPAGING */
+
+#ifdef CONFIG_HAWKEYE
+#define IF_HAVE_PG_ZEROED(flag,string) ,{1UL << flag, string}
+#else
+#define IF_HAVE_PG_ZEROED(flag,string)
+#endif /* CONFIG_HAWKEYE */
+
 #define __def_pageflag_names						\
 	{1UL << PG_locked,		"locked"	},		\
 	{1UL << PG_waiters,		"waiters"	},		\
@@ -123,13 +137,16 @@
 	{1UL << PG_reclaim,		"reclaim"	},		\
 	{1UL << PG_swapbacked,		"swapbacked"	},		\
 	{1UL << PG_unevictable,		"unevictable"	}		\
+IF_HAVE_PG_ZEROED(PG_zeroed,		"zero-filled"	)		\
 IF_HAVE_PG_MLOCK(PG_mlocked,		"mlocked"	)		\
 IF_HAVE_PG_UNCACHED(PG_uncached,	"uncached"	)		\
 IF_HAVE_PG_HWPOISON(PG_hwpoison,	"hwpoison"	)		\
 IF_HAVE_PG_IDLE(PG_young,		"young"		)		\
 IF_HAVE_PG_IDLE(PG_idle,		"idle"		)		\
 IF_HAVE_PG_ARCH_2(PG_arch_2,		"arch_2"	)		\
-IF_HAVE_PG_SKIP_KASAN_POISON(PG_skip_kasan_poison, "skip_kasan_poison")
+IF_HAVE_PG_SKIP_KASAN_POISON(PG_skip_kasan_poison, "skip_kasan_poison") \
+IF_HAVE_PG_PCPLOCKED(PG_pcplocked, "pcplocked") \
+IF_HAVE_PG_LESHY(PG_leshy, "leshy") \
 
 #define show_page_flags(flags)						\
 	(flags) ? __print_flags(flags, "|",				\

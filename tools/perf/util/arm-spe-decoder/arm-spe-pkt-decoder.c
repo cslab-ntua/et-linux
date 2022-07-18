@@ -10,6 +10,7 @@
 #include <byteswap.h>
 #include <linux/bitops.h>
 #include <stdarg.h>
+#include <stdlib.h>
 
 #include "arm-spe-pkt-decoder.h"
 
@@ -434,6 +435,11 @@ static int arm_spe_pkt_desc_addr(const struct arm_spe_pkt *packet,
 				(idx == 1) ? "TGT" : "PC", payload, el, ns);
 		break;
 	case SPE_ADDR_PKT_HDR_INDEX_DATA_VIRT:
+		if (getenv("DUMP")) {
+			arm_spe_pkt_out_string(&err, &buf, &buf_len,
+						   "0x%llx", payload);
+			break;
+		}
 		arm_spe_pkt_out_string(&err, &buf, &buf_len,
 				       "VA 0x%llx", payload);
 		break;
@@ -462,8 +468,14 @@ static int arm_spe_pkt_desc_counter(const struct arm_spe_pkt *packet,
 	const char *name = arm_spe_pkt_name(packet->type);
 	int err = 0;
 
+	if (getenv("DUMP")) {
+		arm_spe_pkt_out_string(&err, &buf, &buf_len, "%d ",
+				(unsigned short)payload);
+		return err;
+	}
+
 	arm_spe_pkt_out_string(&err, &buf, &buf_len, "%s %d ", name,
-			       (unsigned short)payload);
+				   (unsigned short)payload);
 
 	switch (packet->index) {
 	case SPE_CNT_PKT_HDR_INDEX_TOTAL_LAT:

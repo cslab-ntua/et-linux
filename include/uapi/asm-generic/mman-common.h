@@ -77,6 +77,18 @@
 
 #define MADV_DONTNEED_LOCKED	24	/* like DONTNEED, but drop locked pages too */
 
+#ifdef CONFIG_HAVE_ARCH_ELASTIC_TRANSLATIONS
+#define MADV_ELASTIC	25	/* Enable Elastic Translations for this VMA */
+#endif /* CONFIG_HAVE_ARCH_ELASTIC_TRANSLATIONS */
+
+#ifdef CONFIG_COALAPAGING
+#define MADV_COALA	26	/* Enable COALAPaging for this VMA */
+#define MADV_COALA_HINT_64K	27
+#define MADV_COALA_HINT_2M	28
+#define MADV_COALA_HINT_32M	29
+#define MADV_COALA_HINT_KHUGE 30
+#endif /* CONFIG_COALAPAGING */
+
 /* compatibility flags */
 #define MAP_FILE	0
 

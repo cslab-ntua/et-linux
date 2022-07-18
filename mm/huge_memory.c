@@ -41,8 +41,16 @@
 #include <asm/pgalloc.h>
 #include "internal.h"
 
+#ifdef CONFIG_HAWKEYE
+#include <linux/ohp.h>
+#endif /* CONFIG_HAWKEYE */
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/thp.h>
+
+#ifdef CONFIG_COALAPAGING
+#include <linux/coalapaging.h>
+#endif /* CONFIG_COALAPAGING */
 
 /*
  * By default, transparent hugepage support is disabled in order to avoid
@@ -335,6 +343,30 @@ static ssize_t hpage_pmd_size_show(struct kobject *kobj,
 static struct kobj_attribute hpage_pmd_size_attr =
 	__ATTR_RO(hpage_pmd_size);
 
+#ifdef CONFIG_HAWKEYE
+extern bool ohp_disable_thp;
+static ssize_t ohp_disable_thp_show(struct kobject *kobj,
+				  struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", ohp_disable_thp);
+}
+static ssize_t ohp_disable_thp_store(struct kobject *kobj,
+		struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	unsigned long val;
+	int ret = kstrtoul(buf, 10, &val);
+	if (ret < 0)
+		return ret;
+	if (val > 1)
+		return -EINVAL;
+
+	ohp_disable_thp = !!val;
+	return count;
+}
+static struct kobj_attribute ohp_disable_thp_attr =
+	__ATTR(ohp_disable_thp, 0644, ohp_disable_thp_show, ohp_disable_thp_store);
+#endif /* CONFIG_HAWKEYE */
+
 static struct attribute *hugepage_attr[] = {
 	&enabled_attr.attr,
 	&defrag_attr.attr,
@@ -343,6 +375,9 @@ static struct attribute *hugepage_attr[] = {
 #ifdef CONFIG_SHMEM
 	&shmem_enabled_attr.attr,
 #endif
+#ifdef CONFIG_HAWKEYE
+	&ohp_disable_thp_attr.attr,
+#endif /* CONFIG_HAWKEYE */
 	NULL,
 };
 
@@ -608,6 +643,7 @@ static vm_fault_t __do_huge_pmd_anonymous_page(struct vm_fault *vmf,
 		put_page(page);
 		count_vm_event(THP_FAULT_FALLBACK);
 		count_vm_event(THP_FAULT_FALLBACK_CHARGE);
+
 		return VM_FAULT_FALLBACK;
 	}
 	cgroup_throttle_swaprate(page, gfp);
@@ -618,7 +654,10 @@ static vm_fault_t __do_huge_pmd_anonymous_page(struct vm_fault *vmf,
 		goto release;
 	}
 
-	clear_huge_page(page, vmf->address, HPAGE_PMD_NR);
+#ifdef CONFIG_HAWKEYE
+	if (!PageZeroed(page))
+#endif /* CONFIG_HAWKEYE */
+		clear_huge_page(page, vmf->address, HPAGE_PMD_NR);
 	/*
 	 * The memory barrier inside __SetPageUptodate makes sure that
 	 * clear_huge_page writes become visible before the set_pmd_at()
@@ -643,6 +682,7 @@ static vm_fault_t __do_huge_pmd_anonymous_page(struct vm_fault *vmf,
 			pte_free(vma->vm_mm, pgtable);
 			ret = handle_userfault(vmf, VM_UFFD_MISSING);
 			VM_BUG_ON(ret & VM_FAULT_FALLBACK);
+
 			return ret;
 		}
 
@@ -726,15 +766,26 @@ vm_fault_t do_huge_pmd_anonymous_page(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	gfp_t gfp;
-	struct page *page;
+	struct page *page = NULL;
 	unsigned long haddr = vmf->address & HPAGE_PMD_MASK;
 
 	if (!transhuge_vma_suitable(vma, haddr))
 		return VM_FAULT_FALLBACK;
 	if (unlikely(anon_vma_prepare(vma)))
 		return VM_FAULT_OOM;
+#ifdef CONFIG_HAWKEYE
+	if (unlikely(ohp_enter(vma, vmf->address, vma->vm_flags)))
+		return VM_FAULT_OOM;
+#else /* !CONFIG_HAWKEYE */
 	if (unlikely(khugepaged_enter(vma, vma->vm_flags)))
 		return VM_FAULT_OOM;
+#endif /* !CONFIG_HAWKEYE */
+
+#ifdef CONFIG_COALAPAGING
+	if (coala_skip_thp(vma, haddr))
+		return VM_FAULT_FALLBACK;
+#endif /* CONFIG_COALAPAGING */
+
 	if (!(vmf->flags & FAULT_FLAG_WRITE) &&
 			!mm_forbids_zeropage(vma->vm_mm) &&
 			transparent_hugepage_use_zero_page()) {
@@ -775,9 +826,15 @@ vm_fault_t do_huge_pmd_anonymous_page(struct vm_fault *vmf)
 		return ret;
 	}
 	gfp = vma_thp_gfp_mask(vma);
-	page = alloc_hugepage_vma(gfp, vma, haddr, HPAGE_PMD_ORDER);
+
+#ifdef CONFIG_HAWKEYE
+	if (!ohp_disable_thp)
+#endif /* CONFIG_HAWKEYE */
+		page = alloc_hugepage_vma(gfp, vma, haddr, HPAGE_PMD_ORDER);
+
 	if (unlikely(!page)) {
 		count_vm_event(THP_FAULT_FALLBACK);
+
 		return VM_FAULT_FALLBACK;
 	}
 	prep_transhuge_page(page);

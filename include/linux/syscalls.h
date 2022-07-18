@@ -1168,6 +1168,9 @@ asmlinkage long sys_uselib(const char __user *library);
 asmlinkage long sys_sysfs(int option,
 				unsigned long arg1, unsigned long arg2);
 asmlinkage long sys_fork(void);
+#ifdef CONFIG_HAWKEYE
+asmlinkage long update_mm_ohp_stats(unsigned int pid, unsigned int value);
+#endif /* CONFIG_HAWKEYE */
 
 /* obsolete: kernel/time/time.c */
 asmlinkage long sys_stime(__kernel_old_time_t __user *tptr);

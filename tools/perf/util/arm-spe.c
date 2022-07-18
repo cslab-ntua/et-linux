@@ -105,9 +105,11 @@ static void arm_spe_dump(struct arm_spe *spe __maybe_unused,
 	char desc[ARM_SPE_PKT_DESC_MAX];
 	const char *color = PERF_COLOR_BLUE;
 
-	color_fprintf(stdout, color,
-		      ". ... ARM SPE data: size %#zx bytes\n",
-		      len);
+	if (!getenv("DUMP")) {
+		color_fprintf(stdout, color,
+				  ". ... ARM SPE data: size %#zx bytes\n",
+				  len);
+	}
 
 	while (len) {
 		ret = arm_spe_get_packet(buf, len, &packet);
@@ -115,7 +117,23 @@ static void arm_spe_dump(struct arm_spe *spe __maybe_unused,
 			pkt_len = ret;
 		else
 			pkt_len = 1;
-		printf(".");
+
+		if (getenv("DUMP")) {
+			if ((packet.type == ARM_SPE_ADDRESS &&
+					packet.index == SPE_ADDR_PKT_HDR_INDEX_DATA_VIRT) ||
+				(packet.type == ARM_SPE_COUNTER &&
+					packet.index == SPE_CNT_PKT_HDR_INDEX_TRANS_LAT)) {
+				ret = arm_spe_pkt_desc(&packet, desc, ARM_SPE_PKT_DESC_MAX);
+				if (!ret) {
+					fprintf(stdout, "%s\n", desc);
+				}
+			}
+			goto out;
+		}
+
+		if (!getenv("DUMP")) {
+			printf(".");
+		}
 		color_fprintf(stdout, color, "  %08x: ", pos);
 		for (i = 0; i < pkt_len; i++)
 			color_fprintf(stdout, color, " %02x", buf[i]);
@@ -129,6 +147,7 @@ static void arm_spe_dump(struct arm_spe *spe __maybe_unused,
 		} else {
 			color_fprintf(stdout, color, " Bad packet!\n");
 		}
+out:
 		pos += pkt_len;
 		buf += pkt_len;
 		len -= pkt_len;
@@ -138,7 +157,9 @@ static void arm_spe_dump(struct arm_spe *spe __maybe_unused,
 static void arm_spe_dump_event(struct arm_spe *spe, unsigned char *buf,
 			       size_t len)
 {
-	printf(".\n");
+	if (!getenv("DUMP")) {
+		printf(".\n");
+	}
 	arm_spe_dump(spe, buf, len);
 }
 
@@ -794,6 +815,9 @@ static int arm_spe_process_event(struct perf_session *session,
 	if (dump_trace)
 		return 0;
 
+	if (getenv("DUMP"))
+		return 0;
+
 	if (!tool->ordered_events) {
 		pr_err("SPE trace requires ordered events\n");
 		return -EINVAL;
@@ -857,7 +881,7 @@ static int arm_spe_process_auxtrace_event(struct perf_session *session,
 			return err;
 
 		/* Dump here now we have copied a piped trace out of the pipe */
-		if (dump_trace) {
+		if (dump_trace || getenv("DUMP")) {
 			if (auxtrace_buffer__get_data(buffer, fd)) {
 				arm_spe_dump_event(spe, buffer->data,
 						buffer->size);
@@ -877,6 +901,9 @@ static int arm_spe_flush(struct perf_session *session __maybe_unused,
 	int ret;
 
 	if (dump_trace)
+		return 0;
+
+	if (getenv("DUMP"))
 		return 0;
 
 	if (!tool->ordered_events)
@@ -1233,6 +1260,10 @@ int arm_spe_process_auxtrace_info(union perf_event *event,
 
 	if (dump_trace)
 		return 0;
+
+	if (getenv("DUMP")) {
+		return 0;
+	}
 
 	if (session->itrace_synth_opts && session->itrace_synth_opts->set)
 		spe->synth_opts = *session->itrace_synth_opts;

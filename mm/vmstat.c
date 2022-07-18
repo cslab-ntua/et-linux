@@ -1360,6 +1360,9 @@ const char * const vmstat_text[] = {
 	"thp_scan_exceed_none_pte",
 	"thp_scan_exceed_swap_pte",
 	"thp_scan_exceed_share_pte",
+#ifdef CONFIG_HAWKEYE
+	"ohp_promote_failed",
+#endif /* CONFIG_HAWKEYE */
 #ifdef CONFIG_HAVE_ARCH_TRANSPARENT_HUGEPAGE_PUD
 	"thp_split_pud",
 #endif

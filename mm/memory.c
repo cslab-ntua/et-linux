@@ -87,6 +87,13 @@
 #include "pgalloc-track.h"
 #include "internal.h"
 
+#ifdef CONFIG_PFTRACE
+#include <linux/tracepoint-defs.h>
+
+DECLARE_TRACEPOINT(fault);
+void do_trace_fault(unsigned long cycles);
+#endif /* CONFIG_PFTRACE */
+
 #if defined(LAST_CPUPID_NOT_IN_PAGE_FLAGS) && !defined(CONFIG_COMPILE_TEST)
 #warning Unfortunate NUMA and NUMA Balancing config, growing page-frame for last_cpupid.
 #endif
@@ -1645,6 +1652,9 @@ void unmap_vmas(struct mmu_gather *tlb,
 		unmap_single_vma(tlb, vma, start_addr, end_addr, NULL);
 	mmu_notifier_invalidate_range_end(&range);
 }
+#ifdef CONFIG_HAWKEYE
+EXPORT_SYMBOL(zap_page_range);
+#endif /* CONFIG_HAWKEYE */
 
 /**
  * zap_page_range - remove user pages in a given range
@@ -4834,10 +4844,14 @@ static inline void mm_account_fault(struct pt_regs *regs,
  * The mmap_lock may have been released depending on flags and our
  * return value.  See filemap_fault() and __folio_lock_or_retry().
  */
+
 vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 			   unsigned int flags, struct pt_regs *regs)
 {
 	vm_fault_t ret;
+#ifdef CONFIG_PFTRACE
+	unsigned long cycles = get_cycles();
+#endif /* CONFIG_PFTRACE */
 
 	__set_current_state(TASK_RUNNING);
 
@@ -4849,8 +4863,15 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 
 	if (!arch_vma_access_permitted(vma, flags & FAULT_FLAG_WRITE,
 					    flags & FAULT_FLAG_INSTRUCTION,
-					    flags & FAULT_FLAG_REMOTE))
+					    flags & FAULT_FLAG_REMOTE)) {
+#ifdef CONFIG_PFTRACE
+		if (tracepoint_enabled(fault)) {
+			do_trace_fault(get_cycles() - cycles);
+		}
+#endif /* CONFIG_PFTRACE */
+
 		return VM_FAULT_SIGSEGV;
+	}
 
 	/*
 	 * Enable the memcg OOM handling for faults triggered in user
@@ -4859,9 +4880,9 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 	if (flags & FAULT_FLAG_USER)
 		mem_cgroup_enter_user_fault();
 
-	if (unlikely(is_vm_hugetlb_page(vma)))
+	if (unlikely(is_vm_hugetlb_page(vma))) {
 		ret = hugetlb_fault(vma->vm_mm, vma, address, flags);
-	else
+	} else
 		ret = __handle_mm_fault(vma, address, flags);
 
 	if (flags & FAULT_FLAG_USER) {
@@ -4877,6 +4898,12 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 	}
 
 	mm_account_fault(regs, address, flags, ret);
+
+#ifdef CONFIG_PFTRACE
+	if (tracepoint_enabled(fault)) {
+		do_trace_fault(get_cycles() - cycles);
+	}
+#endif /* CONFIG_PFTRACE */
 
 	return ret;
 }
@@ -5400,7 +5427,10 @@ static void clear_subpage(unsigned long addr, int idx, void *arg)
 {
 	struct page *page = arg;
 
-	clear_user_highpage(page + idx, addr);
+#ifdef CONFIG_HAWKEYE
+	if (!PageZeroed(page))
+#endif /* CONFIG_HAWKEYE */
+		clear_user_highpage(page + idx, addr);
 }
 
 void clear_huge_page(struct page *page,

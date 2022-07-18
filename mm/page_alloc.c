@@ -82,6 +82,21 @@
 #include "shuffle.h"
 #include "page_reporting.h"
 
+#ifdef CONFIG_COALAPAGING
+#include <linux/coalapaging.h>
+#include <linux/rwlock.h>
+#endif /*CONFIG_COALAPAGING */
+
+#ifdef CONFIG_PFTRACE
+#include <linux/tracepoint-defs.h>
+
+DECLARE_TRACEPOINT(rmqueue);
+void do_trace_rmqueue(unsigned long cycles);
+
+DECLARE_TRACEPOINT(getfreepage);
+void do_trace_getfreepage(unsigned long cycles);
+#endif /* CONFIG_PFTRACE */
+
 /* Free Page Internal flags: for internal, non-pcp variants of free_pages(). */
 typedef int __bitwise fpi_t;
 
@@ -951,6 +966,10 @@ compaction_capture(struct capture_control *capc, struct page *page,
 }
 #endif /* CONFIG_COMPACTION */
 
+#ifdef CONFIG_COALAPAGING
+#include "coalapaging/alloc.h"
+#endif /* CONFIG_COALAPAGING */
+
 /* Used for pages not on another list */
 static inline void add_to_free_list(struct page *page, struct zone *zone,
 				    unsigned int order, int migratetype)
@@ -958,6 +977,7 @@ static inline void add_to_free_list(struct page *page, struct zone *zone,
 	struct free_area *area = &zone->free_area[order];
 
 	list_add(&page->lru, &area->free_list[migratetype]);
+
 	area->nr_free++;
 }
 
@@ -1058,6 +1078,9 @@ static inline void __free_one_page(struct page *page,
 	unsigned long combined_pfn;
 	struct page *buddy;
 	bool to_tail;
+#ifdef CONFIG_HAWKEYE
+	unsigned long i;
+#endif /* CONFIG_HAWKEYE */
 
 	VM_BUG_ON(!zone_is_initialized(zone));
 	VM_BUG_ON_PAGE(page->flags & PAGE_FLAGS_CHECK_AT_PREP, page);
@@ -1068,6 +1091,15 @@ static inline void __free_one_page(struct page *page,
 
 	VM_BUG_ON_PAGE(pfn & ((1 << order) - 1), page);
 	VM_BUG_ON_PAGE(bad_range(zone, page), page);
+
+#ifdef CONFIG_HAWKEYE
+	for (i = 0; i < (1 << order); i++)
+		ClearPageZeroed(page + i);
+#endif /* CONFIG_HAWKEYE */
+
+#ifdef CONFIG_COALAPAGING
+	ClearPageLeshy(page);
+#endif /* CONFIG_COALAPAGING */
 
 continue_merging:
 	while (order < max_order) {
@@ -1288,7 +1320,10 @@ static void kernel_init_free_pages(struct page *page, int numpages)
 	/* s390's use of memset() could override KASAN redzones. */
 	kasan_disable_current();
 	for (i = 0; i < numpages; i++)
-		clear_highpage_kasan_tagged(page + i);
+#ifdef CONFIG_HAWKEYE
+		if (!PageZeroed(page + i))
+#endif /* CONFIG_HAWKEYE */
+			clear_highpage_kasan_tagged(page + i);
 	kasan_enable_current();
 }
 
@@ -1446,6 +1481,12 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 	struct page *page;
 
 	/*
+	 * local_lock_irq held so equivalent to spin_lock_irqsave for
+	 * both PREEMPT_RT and non-PREEMPT_RT configurations.
+	 */
+	spin_lock(&zone->lock);
+
+	/*
 	 * Ensure proper count is passed which otherwise would stuck in the
 	 * below while (list_empty(list)) loop.
 	 */
@@ -1454,11 +1495,6 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 	/* Ensure requested pindex is drained first. */
 	pindex = pindex - 1;
 
-	/*
-	 * local_lock_irq held so equivalent to spin_lock_irqsave for
-	 * both PREEMPT_RT and non-PREEMPT_RT configurations.
-	 */
-	spin_lock(&zone->lock);
 	isolated_pageblocks = has_isolate_pageblock(zone);
 
 	while (count > 0) {
@@ -1484,17 +1520,26 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 		BUILD_BUG_ON(MAX_ORDER >= (1<<NR_PCP_ORDER_WIDTH));
 		do {
 			int mt;
-
 			page = list_last_entry(list, struct page, lru);
 			mt = get_pcppage_migratetype(page);
 
+#ifdef CONFIG_COALAPAGING
+			while (TestSetPagePcplocked(page)) ;
+			__ClearPageCaPcpFree(page);
+			set_page_private(page, 0);
+			page->mapping = NULL;
+#endif /* CONFIG_COALAPAGING */
 			/* must delete to avoid corrupting pcp list */
 			list_del(&page->lru);
+#ifdef CONFIG_COALAPAGING
+			ClearPagePcplocked(page);
+#endif /* CONFIG_COALAPAGING */
 			count -= nr_pages;
 			pcp->count -= nr_pages;
 
-			if (bulkfree_pcp_prepare(page))
+			if (bulkfree_pcp_prepare(page)) {
 				continue;
+			}
 
 			/* MIGRATE_ISOLATE page should not go to pcplists */
 			VM_BUG_ON_PAGE(is_migrate_isolate(mt), page);
@@ -1506,7 +1551,6 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 			trace_mm_page_pcpu_drain(page, order, mt);
 		} while (count > 0 && !list_empty(list));
 	}
-
 	spin_unlock(&zone->lock);
 }
 
@@ -3024,6 +3068,9 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 			int migratetype, unsigned int alloc_flags)
 {
 	int i, allocated = 0;
+#ifdef CONFIG_COALAPAGING
+	struct list_head (*pcp_lists)[NR_PCP_LISTS];
+#endif /* CONFIG_COALAPAGING */
 
 	/*
 	 * local_lock_irq held so equivalent to spin_lock_irqsave for
@@ -3049,7 +3096,17 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 		 * for IO devices that can merge IO requests if the physical
 		 * pages are ordered properly.
 		 */
+#ifdef CONFIG_COALAPAGING
+		while (TestSetPagePcplocked(page)) ;
+#endif /* CONFIG_COALAPAGING */
 		list_add_tail(&page->lru, list);
+#ifdef CONFIG_COALAPAGING
+		pcp_lists = (struct list_head (*)[NR_PCP_LISTS])(list - order_to_pindex(migratetype, order));
+		page->mapping = (struct address_space *)container_of(pcp_lists, struct per_cpu_pages, lists);
+		__SetPageCaPcpFree(page);
+		set_page_private(page, order);
+		ClearPagePcplocked(page);
+#endif /* CONFIG_COALAPAGING */
 		allocated++;
 		if (is_migrate_cma(get_pcppage_migratetype(page)))
 			__mod_zone_page_state(zone, NR_FREE_CMA_PAGES,
@@ -3082,10 +3139,16 @@ void drain_zone_pages(struct zone *zone, struct per_cpu_pages *pcp)
 	int to_drain, batch;
 
 	local_lock_irqsave(&pagesets.lock, flags);
+#ifdef CONFIG_COALAPAGING
+	spin_lock(&pcp->lock);
+#endif /* CONFIG_COALAPAGING */
 	batch = READ_ONCE(pcp->batch);
 	to_drain = min(pcp->count, batch);
 	if (to_drain > 0)
 		free_pcppages_bulk(zone, to_drain, pcp, 0);
+#ifdef CONFIG_COALAPAGING
+	spin_unlock(&pcp->lock);
+#endif /* CONFIG_COALAPAGING */
 	local_unlock_irqrestore(&pagesets.lock, flags);
 }
 #endif
@@ -3103,11 +3166,15 @@ static void drain_pages_zone(unsigned int cpu, struct zone *zone)
 	struct per_cpu_pages *pcp;
 
 	local_lock_irqsave(&pagesets.lock, flags);
-
 	pcp = per_cpu_ptr(zone->per_cpu_pageset, cpu);
+#ifdef CONFIG_COALAPAGING
+	spin_lock(&pcp->lock);
+#endif /* CONFIG_COALAPAGING */
 	if (pcp->count)
 		free_pcppages_bulk(zone, pcp->count, pcp, 0);
-
+#ifdef CONFIG_COALAPAGING
+	spin_unlock(&pcp->lock);
+#endif /* CONFIG_COALAPAGING */
 	local_unlock_irqrestore(&pagesets.lock, flags);
 }
 
@@ -3385,12 +3452,27 @@ static void free_unref_page_commit(struct page *page, int migratetype,
 	int pindex;
 	bool free_high;
 
+#ifdef CONFIG_HAWKEYE
+	ClearPageZeroed(page);
+#endif /* CONFIG_HAWKEYE */
 	__count_vm_event(PGFREE);
 	pcp = this_cpu_ptr(zone->per_cpu_pageset);
+#ifdef CONFIG_COALAPAGING
+	spin_lock(&pcp->lock);
+#endif /* CONFIG_COALAPAGING */
 	pindex = order_to_pindex(migratetype, order);
-	list_add(&page->lru, &pcp->lists[pindex]);
-	pcp->count += 1 << order;
 
+#ifdef CONFIG_COALAPAGING
+	while (TestSetPagePcplocked(page)) ;
+#endif /* CONFIG_COALAPAGING */
+	list_add(&page->lru, &pcp->lists[pindex]);
+#ifdef CONFIG_COALAPAGING
+	page->mapping = (struct address_space *)pcp;
+	__SetPageCaPcpFree(page);
+	set_page_private(page, order);
+	ClearPagePcplocked(page);
+#endif /* CONFIG_COALAPAGING */
+	pcp->count += 1 << order;
 	/*
 	 * As high-order pages other than THP's stored on PCP can contribute
 	 * to fragmentation, limit the number stored when PCP is heavily
@@ -3405,6 +3487,9 @@ static void free_unref_page_commit(struct page *page, int migratetype,
 
 		free_pcppages_bulk(zone, nr_pcp_free(pcp, high, batch, free_high), pcp, pindex);
 	}
+#ifdef CONFIG_COALAPAGING
+	spin_unlock(&pcp->lock);
+#endif /* CONFIG_COALAPAGING */
 }
 
 /*
@@ -3544,7 +3629,6 @@ int __isolate_free_page(struct page *page, unsigned int order)
 	}
 
 	/* Remove page from free list */
-
 	del_page_from_free_list(page, zone, order);
 
 	/*
@@ -3564,7 +3648,6 @@ int __isolate_free_page(struct page *page, unsigned int order)
 							  MIGRATE_MOVABLE);
 		}
 	}
-
 
 	return 1UL << order;
 }
@@ -3647,12 +3730,22 @@ struct page *__rmqueue_pcplist(struct zone *zone, unsigned int order,
 					migratetype, alloc_flags);
 
 			pcp->count += alloced << order;
-			if (unlikely(list_empty(list)))
+			if (unlikely(list_empty(list))) {
 				return NULL;
+			}
 		}
 
 		page = list_first_entry(list, struct page, lru);
+#ifdef CONFIG_COALAPAGING
+		while (TestSetPagePcplocked(page)) ;
+		__ClearPageCaPcpFree(page);
+		page->mapping = NULL;
+		set_page_private(page, 0);
+#endif /* CONFIG_COALAPAGING */
 		list_del(&page->lru);
+#ifdef CONFIG_COALAPAGING
+		ClearPagePcplocked(page);
+#endif /* CONFIG_COALAPAGING */
 		pcp->count -= 1 << order;
 	} while (check_new_pcp(page, order));
 
@@ -3671,16 +3764,21 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 	unsigned long flags;
 
 	local_lock_irqsave(&pagesets.lock, flags);
-
 	/*
 	 * On allocation, reduce the number of pages that are batch freed.
 	 * See nr_pcp_free() where free_factor is increased for subsequent
 	 * frees.
 	 */
 	pcp = this_cpu_ptr(zone->per_cpu_pageset);
+#ifdef CONFIG_COALAPAGING
+	spin_lock(&pcp->lock);
+#endif /* CONFIG_COALAPAGING */
 	pcp->free_factor >>= 1;
 	list = &pcp->lists[order_to_pindex(migratetype, order)];
 	page = __rmqueue_pcplist(zone, order, migratetype, alloc_flags, pcp, list);
+#ifdef CONFIG_COALAPAGING
+	spin_unlock(&pcp->lock);
+#endif /* CONFIG_COALAPAGING */
 	local_unlock_irqrestore(&pagesets.lock, flags);
 	if (page) {
 		__count_zid_vm_events(PGALLOC, page_zonenum(page), 1);
@@ -3700,6 +3798,9 @@ struct page *rmqueue(struct zone *preferred_zone,
 {
 	unsigned long flags;
 	struct page *page;
+#ifdef CONFIG_PFTRACE
+	unsigned long cycles = get_cycles();
+#endif /* CONFIG_PFTRACE */
 
 	if (likely(pcp_allowed_order(order))) {
 		/*
@@ -3755,10 +3856,22 @@ out:
 	}
 
 	VM_BUG_ON_PAGE(page && bad_range(zone, page), page);
+#ifdef CONFIG_PFTRACE
+	if (tracepoint_enabled(rmqueue)) {
+		do_trace_rmqueue(get_cycles() - cycles);
+	}
+#endif /* CONFIG_PFTRACE */
+
 	return page;
 
 failed:
 	spin_unlock_irqrestore(&zone->lock, flags);
+#ifdef CONFIG_PFTRACE
+	if (tracepoint_enabled(rmqueue)) {
+		do_trace_rmqueue(get_cycles() - cycles);
+	}
+#endif /* CONFIG_PFTRACE */
+
 	return NULL;
 }
 
@@ -4070,6 +4183,9 @@ get_page_from_freelist(gfp_t gfp_mask, unsigned int order, int alloc_flags,
 	struct zone *zone;
 	struct pglist_data *last_pgdat_dirty_limit = NULL;
 	bool no_fallback;
+#ifdef CONFIG_PFTRACE
+	unsigned long cycles = get_cycles();
+#endif /* CONFIG_PFTRACE */
 
 retry:
 	/*
@@ -4087,6 +4203,7 @@ retry:
 			(alloc_flags & ALLOC_CPUSET) &&
 			!__cpuset_zone_allowed(zone, gfp_mask))
 				continue;
+
 		/*
 		 * When allocating a page cache page for writing, we
 		 * want to get it from a node that is within its dirty
@@ -4137,7 +4254,6 @@ retry:
 				       ac->highest_zoneidx, alloc_flags,
 				       gfp_mask)) {
 			int ret;
-
 #ifdef CONFIG_DEFERRED_STRUCT_PAGE_INIT
 			/*
 			 * Watermark failed for this zone, but see if we can
@@ -4176,8 +4292,19 @@ retry:
 		}
 
 try_this_zone:
+#ifdef CONFIG_COALAPAGING
+		/* COALAPaging request, call coala_rmqueue */
+		page = NULL;
+		if (ac->coalareq) {
+			page = coala_rmqueue(ac->preferred_zoneref->zone, zone, order,
+				gfp_mask, alloc_flags, ac->migratetype, ac->coalareq);
+		}
+
+		if (!page)
+#endif /* CONFIG_COALAPAGING */
 		page = rmqueue(ac->preferred_zoneref->zone, zone, order,
 				gfp_mask, alloc_flags, ac->migratetype);
+
 		if (page) {
 			prep_new_page(page, order, gfp_mask, alloc_flags);
 
@@ -4187,6 +4314,12 @@ try_this_zone:
 			 */
 			if (unlikely(order && (alloc_flags & ALLOC_HARDER)))
 				reserve_highatomic_pageblock(page, zone, order);
+
+#ifdef CONFIG_PFTRACE
+			if (tracepoint_enabled(getfreepage)) {
+				do_trace_getfreepage(get_cycles() - cycles);
+			}
+#endif /* CONFIG_PFTRACE */
 
 			return page;
 		} else {
@@ -4209,6 +4342,11 @@ try_this_zone:
 		goto retry;
 	}
 
+#ifdef CONFIG_PFTRACE
+	if (tracepoint_enabled(getfreepage)) {
+		do_trace_getfreepage(get_cycles() - cycles);
+	}
+#endif /* CONFIG_PFTRACE */
 	return NULL;
 }
 
@@ -4943,8 +5081,9 @@ retry_cpuset:
 			goto nopage;
 	}
 
-	if (alloc_flags & ALLOC_KSWAPD)
+	if (alloc_flags & ALLOC_KSWAPD) {
 		wake_all_kswapds(order, gfp_mask, ac);
+	}
 
 	/*
 	 * The adjusted alloc_flags might result in immediate success, so try
@@ -5011,8 +5150,9 @@ retry_cpuset:
 
 retry:
 	/* Ensure kswapd doesn't accidentally go to sleep as long as we loop */
-	if (alloc_flags & ALLOC_KSWAPD)
+	if (alloc_flags & ALLOC_KSWAPD) {
 		wake_all_kswapds(order, gfp_mask, ac);
+	}
 
 	reserve_flags = __gfp_pfmemalloc_flags(gfp_mask);
 	if (reserve_flags)
@@ -5080,7 +5220,6 @@ retry:
 				compact_result, &compact_priority,
 				&compaction_retries))
 		goto retry;
-
 
 	/* Deal with possible cpuset update races before we start OOM killing */
 	if (check_retry_cpuset(cpuset_mems_cookie, ac))
@@ -5311,6 +5450,9 @@ unsigned long __alloc_pages_bulk(gfp_t gfp, int preferred_nid,
 	/* Attempt the batch allocation */
 	local_lock_irqsave(&pagesets.lock, flags);
 	pcp = this_cpu_ptr(zone->per_cpu_pageset);
+#ifdef CONFIG_COALAPAGING
+	spin_lock(&pcp->lock);
+#endif /* CONFIG_COALAPAGING */
 	pcp_list = &pcp->lists[order_to_pindex(ac.migratetype, 0)];
 
 	while (nr_populated < nr_pages) {
@@ -5339,6 +5481,9 @@ unsigned long __alloc_pages_bulk(gfp_t gfp, int preferred_nid,
 		nr_populated++;
 	}
 
+#ifdef CONFIG_COALAPAGING
+	spin_unlock(&pcp->lock);
+#endif /* CONFIG_COALAPAGING */
 	local_unlock_irqrestore(&pagesets.lock, flags);
 
 	__count_zid_vm_events(PGALLOC, zone_idx(zone), nr_account);
@@ -5348,6 +5493,9 @@ out:
 	return nr_populated;
 
 failed_irq:
+#ifdef CONFIG_COALAPAGING
+	spin_unlock(&pcp->lock);
+#endif /* CONFIG_COALAPAGING */
 	local_unlock_irqrestore(&pagesets.lock, flags);
 
 failed:
@@ -5384,6 +5532,12 @@ struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid,
 		return NULL;
 	}
 
+#ifdef CONFIG_COALAPAGING
+	/* We hijack the nodemask pointer to pass the COALAPaging-related stuff */
+	nodemask = coalareq_from_nmask(nodemask, &ac.coalareq);
+	ac.nodemask = nodemask;
+#endif /* CONFIG_COALAPAGING */
+
 	gfp &= gfp_allowed_mask;
 	/*
 	 * Apply scoped allocation constraints. This is mainly about GFP_NOFS
@@ -5393,6 +5547,7 @@ struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid,
 	 * movable zones are not used during allocation.
 	 */
 	gfp = current_gfp_context(gfp);
+
 	alloc_gfp = gfp;
 	if (!prepare_alloc_pages(gfp, order, preferred_nid, nodemask, &ac,
 			&alloc_gfp, &alloc_flags))
@@ -5404,10 +5559,18 @@ struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid,
 	 */
 	alloc_flags |= alloc_flags_nofragment(ac.preferred_zoneref->zone, gfp);
 
+retry:
 	/* First allocation attempt */
 	page = get_page_from_freelist(alloc_gfp, order, alloc_flags, &ac);
 	if (likely(page))
 		goto out;
+
+#ifdef CONFIG_COALAPAGING
+	if (ac.coalareq) {
+		ac.coalareq = NULL;
+		goto retry;
+	}
+#endif /* CONFIG_COALAPAGING */
 
 	alloc_gfp = gfp;
 	ac.spread_dirty_pages = false;
@@ -6990,6 +7153,10 @@ static void per_cpu_pages_init(struct per_cpu_pages *pcp, struct per_cpu_zonesta
 	pcp->high = BOOT_PAGESET_HIGH;
 	pcp->batch = BOOT_PAGESET_BATCH;
 	pcp->free_factor = 0;
+
+#ifdef CONFIG_COALAPAGING
+	spin_lock_init(&pcp->lock);
+#endif /* CONFIG_COALAPAGING */
 }
 
 static void __zone_set_pageset_high_and_batch(struct zone *zone, unsigned long high,

@@ -108,6 +108,17 @@
 
 #include "internal.h"
 
+#ifdef CONFIG_COALAPAGING
+#include <linux/coalapaging.h>
+#endif /* CONFIG_COALAPAGING */
+
+#ifdef CONFIG_PFTRACE
+#include <linux/tracepoint-defs.h>
+
+DECLARE_TRACEPOINT(allocpages);
+void do_trace_allocpages(unsigned long cycles);
+#endif /* CONFIG_PFTRACE */
+
 /* Internal flags */
 #define MPOL_MF_DISCONTIG_OK (MPOL_MF_INTERNAL << 0)	/* Skip checks for continuous vmas */
 #define MPOL_MF_INVERT (MPOL_MF_INTERNAL << 1)		/* Invert check for nodemask */
@@ -2157,6 +2168,9 @@ struct page *alloc_pages_vma(gfp_t gfp, int order, struct vm_area_struct *vma,
 	struct page *page;
 	int preferred_nid;
 	nodemask_t *nmask;
+#ifdef CONFIG_PFTRACE
+	unsigned long cycles = get_cycles();
+#endif /* CONFIG_PFTRACE */
 
 	pol = get_vma_policy(vma, addr);
 
@@ -2175,6 +2189,13 @@ struct page *alloc_pages_vma(gfp_t gfp, int order, struct vm_area_struct *vma,
 		mpol_cond_put(pol);
 		goto out;
 	}
+
+#ifdef CONFIG_COALAPAGING
+	if (coala_is_vma_alloc(vma)) {
+		/* skip the THP NUMA special-case for coalapaging */
+		hugepage = false;
+	}
+#endif /* CONFIG_COALAPAGING */
 
 	if (unlikely(IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE) && hugepage)) {
 		int hpage_node = node;
@@ -2217,9 +2238,22 @@ struct page *alloc_pages_vma(gfp_t gfp, int order, struct vm_area_struct *vma,
 
 	nmask = policy_nodemask(gfp, pol);
 	preferred_nid = policy_node(gfp, pol, node);
+
+#ifdef CONFIG_COALAPAGING
+	if (coala_is_vma_alloc(vma)) {
+		page = coala_alloc_pages_vma(gfp, addr, vma, order, node,
+				preferred_nid, nmask);
+	} else
+#endif /* CONFIG_COALAPAGING */
 	page = __alloc_pages(gfp, order, preferred_nid, nmask);
 	mpol_cond_put(pol);
 out:
+#ifdef CONFIG_PFTRACE
+	if (tracepoint_enabled(allocpages)) {
+		do_trace_allocpages(get_cycles() - cycles);
+	}
+#endif /* CONFIG_PFTRACE */
+
 	return page;
 }
 EXPORT_SYMBOL(alloc_pages_vma);

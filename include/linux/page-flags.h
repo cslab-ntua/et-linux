@@ -119,6 +119,9 @@ enum pageflags {
 	PG_reclaim,		/* To be reclaimed asap */
 	PG_swapbacked,		/* Page is backed by RAM/swap */
 	PG_unevictable,		/* Page is "unevictable"  */
+#ifdef CONFIG_HAWKEYE
+	PG_zeroed,
+#endif /* CONFIG_HAWKEYE */
 #ifdef CONFIG_MMU
 	PG_mlocked,		/* Page is vma mlocked */
 #endif
@@ -138,6 +141,10 @@ enum pageflags {
 #ifdef CONFIG_KASAN_HW_TAGS
 	PG_skip_kasan_poison,
 #endif
+#ifdef CONFIG_COALAPAGING
+	PG_pcplocked,
+	PG_leshy,
+#endif /* CONFIG_COALAPAGING */
 	__NR_PAGEFLAGS,
 
 	PG_readahead = PG_reclaim,
@@ -619,6 +626,13 @@ PAGEFLAG_FALSE(SkipKASanPoison, skip_kasan_poison)
  */
 __PAGEFLAG(Reported, reported, PF_NO_COMPOUND)
 
+#ifdef CONFIG_COALAPAGING
+PAGEFLAG(Pcplocked, pcplocked, PF_ANY)
+TESTSCFLAG(Pcplocked, pcplocked, PF_ANY)
+PAGEFLAG(Leshy, leshy, PF_ANY)
+TESTSCFLAG(Leshy, leshy, PF_ANY)
+#endif /* CONFIG_COALAPAGING */
+
 /*
  * On an anonymous page mapped into a user virtual memory area,
  * page->mapping points to its anon_vma, not to a struct address_space;
@@ -929,6 +943,14 @@ static inline bool is_page_hwpoison(struct page *page)
 #define PG_table	0x00000200
 #define PG_guard	0x00000400
 
+#ifdef CONFIG_COALAPAGING
+/*
+ * page flag for free pages that are not part of the buddy allocator
+ * lists (and thus not marked as Buddy) but are part of the PCP caches
+ */
+#define PG_ca_pcp      0x00001000
+#endif /* CONFIG_COALAPAGING */
+
 #define PageType(page, flag)						\
 	((page->page_type & (PAGE_TYPE_BASE | flag)) == PAGE_TYPE_BASE)
 
@@ -952,6 +974,10 @@ static __always_inline void __ClearPage##uname(struct page *page)	\
 	VM_BUG_ON_PAGE(!Page##uname(page), page);			\
 	page->page_type |= PG_##lname;					\
 }
+
+#ifdef CONFIG_COALAPAGING
+PAGE_TYPE_OPS(CaPcpFree, ca_pcp)
+#endif /* CONFIG_COALAPAGING */
 
 /*
  * PageBuddy() indicates that the page is free and in the buddy system
@@ -1027,8 +1053,18 @@ PAGEFLAG(Isolated, isolated, PF_ANY);
  * __PG_HWPOISON is exceptional because it needs to be kept beyond page's
  * alloc-free cycle to prevent from reusing the page.
  */
+#ifdef CONFIG_HAWKEYE
+/*
+ * The zeroed bit is also freed from the check here because it may or may not
+ * be zero at the time of allocation and we need to take appropriate action
+ * based on the state of zeroed bit.
+ */
+#define PAGE_FLAGS_CHECK_AT_PREP	\
+	(PAGEFLAGS_MASK & ~__PG_HWPOISON & ~(1UL << PG_zeroed))
+#else /* !CONFIG_HAWKEYE */
 #define PAGE_FLAGS_CHECK_AT_PREP	\
 	(PAGEFLAGS_MASK & ~__PG_HWPOISON)
+#endif /* CONFIG_HAWKEYE */
 
 #define PAGE_FLAGS_PRIVATE				\
 	(1UL << PG_private | 1UL << PG_private_2)
@@ -1048,6 +1084,23 @@ static inline bool folio_has_private(struct folio *folio)
 {
 	return page_has_private(&folio->page);
 }
+
+#ifdef CONFIG_HAWKEYE
+static inline int PageZeroed(struct page *page)
+{
+	return test_bit(PG_zeroed, &page->flags);
+}
+
+static inline void SetPageZeroed(struct page *page)
+{
+	set_bit(PG_zeroed, &page->flags);
+}
+
+static inline void ClearPageZeroed(struct page *page)
+{
+	clear_bit(PG_zeroed, &page->flags);
+}
+#endif /* CONFIG_HAWKEYE */
 
 #undef PF_ANY
 #undef PF_HEAD

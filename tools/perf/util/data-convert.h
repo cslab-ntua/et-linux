@@ -18,4 +18,6 @@ int bt_convert__perf2ctf(const char *input_name, const char *to_ctf,
 int bt_convert__perf2json(const char *input_name, const char *to_ctf,
 			 struct perf_data_convert_opts *opts);
 
+int parse_samples(const char *input_name, const char *to_ctf);
+
 #endif /* __DATA_CONVERT_H */

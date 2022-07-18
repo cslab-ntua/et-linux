@@ -5,6 +5,9 @@
 #include <linux/sched/coredump.h> /* MMF_VM_HUGEPAGE */
 #include <linux/shmem_fs.h>
 
+#ifdef CONFIG_COALAPAGING
+extern bool coala_khugepaged;
+#endif /* CONFIG_COALAPAGING */
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 extern struct attribute_group khugepaged_attr_group;

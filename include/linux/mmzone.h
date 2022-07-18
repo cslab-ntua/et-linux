@@ -390,6 +390,10 @@ struct per_cpu_pages {
 	short expire;		/* When 0, remote pagesets are drained */
 #endif
 
+#ifdef CONFIG_COALAPAGING
+	spinlock_t lock;
+#endif /* CONFIG_COALAPAGING */
+
 	/* Lists of pages, one per migrate type stored on the pcp-lists */
 	struct list_head lists[NR_PCP_LISTS];
 };

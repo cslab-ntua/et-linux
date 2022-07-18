@@ -56,4 +56,8 @@ config NVHE_EL2_DEBUG
 
 	  If unsure, say N.
 
+config SPTDUMP
+	bool "SPTE dump via debugfs"
+	depends on KVM
+
 endif # VIRTUALIZATION
