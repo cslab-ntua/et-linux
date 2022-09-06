@@ -1241,7 +1241,7 @@ copy_page_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma)
 	 * readonly mappings. The tradeoff is that copy_page_range is more
 	 * efficient than faulting.
 	 */
-	if (!(src_vma->vm_flags & (VM_HUGETLB | VM_PFNMAP | VM_MIXEDMAP)) &&
+	if (!(src_vma->vm_flags & (VM_PFNMAP | VM_MIXEDMAP)) &&
 	    !src_vma->anon_vma)
 		return 0;
 
