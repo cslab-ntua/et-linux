@@ -29,7 +29,6 @@
 #include <linux/pci.h>
 
 #include <drm/drm_atomic_helper.h>
-#include <drm/drm_crtc_helper.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_gem_vram_helper.h>
@@ -38,28 +37,30 @@
 #include "ast_drv.h"
 
 void ast_set_index_reg_mask(struct ast_private *ast,
-			    uint32_t base, uint8_t index,
-			    uint8_t mask, uint8_t val)
+			    u32 base, u8 index,
+			    u8 mask, u8 val)
 {
-	u8 tmp;
+	u8 ret;
+
 	ast_io_write8(ast, base, index);
-	tmp = (ast_io_read8(ast, base + 1) & mask) | val;
-	ast_set_index_reg(ast, base, index, tmp);
+	ret = (ast_io_read8(ast, base + 1) & mask) | val;
+	ast_set_index_reg(ast, base, index, ret);
 }
 
-uint8_t ast_get_index_reg(struct ast_private *ast,
-			  uint32_t base, uint8_t index)
+u8 ast_get_index_reg(struct ast_private *ast, u32 base, u8 index)
 {
-	uint8_t ret;
+	u8 ret;
+
 	ast_io_write8(ast, base, index);
 	ret = ast_io_read8(ast, base + 1);
 	return ret;
 }
 
-uint8_t ast_get_index_reg_mask(struct ast_private *ast,
-			       uint32_t base, uint8_t index, uint8_t mask)
+u8 ast_get_index_reg_mask(struct ast_private *ast,
+			  u32 base, u8 index, u8 mask)
 {
-	uint8_t ret;
+	u8 ret;
+
 	ast_io_write8(ast, base, index);
 	ret = ast_io_read8(ast, base + 1) & mask;
 	return ret;
@@ -70,7 +71,7 @@ static void ast_detect_config_mode(struct drm_device *dev, u32 *scu_rev)
 	struct device_node *np = dev->dev->of_node;
 	struct ast_private *ast = to_ast_private(dev);
 	struct pci_dev *pdev = to_pci_dev(dev->dev);
-	uint32_t data, jregd0, jregd1;
+	u32 data, jregd0, jregd1;
 
 	/* Defaults */
 	ast->config_mode = ast_use_defaults;
@@ -126,7 +127,7 @@ static int ast_detect_chip(struct drm_device *dev, bool *need_post)
 {
 	struct ast_private *ast = to_ast_private(dev);
 	struct pci_dev *pdev = to_pci_dev(dev->dev);
-	uint32_t jreg, scu_rev;
+	u32 jreg, scu_rev;
 
 	/*
 	 * If VGA isn't enabled, we need to enable now or subsequent
@@ -181,38 +182,23 @@ static int ast_detect_chip(struct drm_device *dev, bool *need_post)
 			drm_info(dev, "AST 2100 detected\n");
 			break;
 		}
-		ast->vga2_clone = false;
 	} else {
 		ast->chip = AST2000;
 		drm_info(dev, "AST 2000 detected\n");
 	}
 
-	/* Check if we support wide screen */
-	switch (ast->chip) {
-	case AST2000:
-		ast->support_wide_screen = false;
-		break;
-	default:
-		jreg = ast_get_index_reg_mask(ast, AST_IO_CRTC_PORT, 0xd0, 0xff);
-		if (!(jreg & 0x80))
-			ast->support_wide_screen = true;
-		else if (jreg & 0x01)
-			ast->support_wide_screen = true;
-		else {
-			ast->support_wide_screen = false;
-			if (ast->chip == AST2300 &&
-			    (scu_rev & 0x300) == 0x0) /* ast1300 */
-				ast->support_wide_screen = true;
-			if (ast->chip == AST2400 &&
-			    (scu_rev & 0x300) == 0x100) /* ast1400 */
-				ast->support_wide_screen = true;
-			if (ast->chip == AST2500 &&
-			    scu_rev == 0x100)           /* ast2510 */
-				ast->support_wide_screen = true;
-			if (ast->chip == AST2600)		/* ast2600 */
-				ast->support_wide_screen = true;
+	/* Check 25MHz Ref CLK */
+	ast->RefCLK25MHz = false;
+	if (ast->chip == AST2400 || ast->chip == AST2500 || ast->chip == AST2600) {
+		if (ast->config_mode == ast_use_p2a) {
+			jreg = ast_read32(ast, 0x12070);
+			if (jreg & 0x00800000)
+				ast->RefCLK25MHz = true;
+		} else {
+			jreg = ast_get_index_reg_mask(ast, AST_IO_CRTC_PORT, 0xd0, 0xff);
+			if (jreg & 0x04)
+				ast->RefCLK25MHz = true;
 		}
-		break;
 	}
 
 	/* Check 3rd Tx option (digital output afaik) */
@@ -232,7 +218,7 @@ static int ast_detect_chip(struct drm_device *dev, bool *need_post)
 			ast->tx_chip_type = AST_TX_SIL164;
 	}
 
-	if ((ast->chip == AST2300) || (ast->chip == AST2400)) {
+	if ((ast->chip == AST2300) || (ast->chip == AST2400) || (ast->chip == AST2500)) {
 		/*
 		 * On AST2300 and 2400, look the configuration set by the SoC in
 		 * the SOC scratch register #1 bits 11:8 (interestingly marked
@@ -244,10 +230,10 @@ static int ast_detect_chip(struct drm_device *dev, bool *need_post)
 			ast->tx_chip_type = AST_TX_SIL164;
 			break;
 		case 0x08:
-			ast->dp501_fw_addr = drmm_kzalloc(dev, 32*1024, GFP_KERNEL);
+			ast->dp501_fw_addr = drmm_kzalloc(dev, 32 * 1024, GFP_KERNEL);
 			if (ast->dp501_fw_addr) {
 				/* backup firmware */
-				if (ast_backup_fw(dev, ast->dp501_fw_addr, 32*1024)) {
+				if (ast_backup_fw(dev, ast->dp501_fw_addr, 32 * 1024) == false) {
 					drmm_kfree(dev, ast->dp501_fw_addr);
 					ast->dp501_fw_addr = NULL;
 				}
@@ -255,6 +241,12 @@ static int ast_detect_chip(struct drm_device *dev, bool *need_post)
 			fallthrough;
 		case 0x0c:
 			ast->tx_chip_type = AST_TX_DP501;
+		}
+	} else if (ast->chip == AST2600) {
+		if (ast_get_index_reg_mask(ast, AST_IO_CRTC_PORT, 0xD1, TX_TYPE_MASK) ==
+		    ASTDP_DPMCU_TX) {
+			ast->tx_chip_type = AST_TX_ASTDP;
+			ast_dp_launch(&ast->base);
 		}
 	}
 
@@ -266,6 +258,9 @@ static int ast_detect_chip(struct drm_device *dev, bool *need_post)
 	case AST_TX_DP501:
 		drm_info(dev, "Using DP501 DisplayPort transmitter\n");
 		break;
+	case AST_TX_ASTDP:
+		drm_info(dev, "Using ASPEED DisplayPort transmitter\n");
+		break;
 	default:
 		drm_info(dev, "Analog VGA only\n");
 	}
@@ -276,8 +271,8 @@ static int ast_get_dram_info(struct drm_device *dev)
 {
 	struct device_node *np = dev->dev->of_node;
 	struct ast_private *ast = to_ast_private(dev);
-	uint32_t mcr_cfg, mcr_scu_mpll, mcr_scu_strap;
-	uint32_t denum, num, div, ref_pll, dsel;
+	u32 mcr_cfg, mcr_scu_mpll, mcr_scu_strap;
+	u32 denum, num, div, ref_pll, dsel;
 
 	switch (ast->config_mode) {
 	case ast_use_dt:
@@ -306,7 +301,7 @@ static int ast_get_dram_info(struct drm_device *dev)
 	default:
 		ast->dram_bus_width = 16;
 		ast->dram_type = AST_DRAM_1Gx16;
-		if (ast->chip == AST2500)
+		if (ast->chip == AST2500 || ast->chip == AST2600)
 			ast->mclk = 800;
 		else
 			ast->mclk = 396;
@@ -420,16 +415,19 @@ struct ast_private *ast_device_create(const struct drm_driver *drv,
 
 	pci_set_drvdata(pdev, dev);
 
+	mutex_init(&ast->ioregs_lock);
+
 	ast->regs = pcim_iomap(pdev, 1, 0);
 	if (!ast->regs)
 		return ERR_PTR(-EIO);
 
 	/*
-	 * If we don't have IO space at all, use MMIO now and
-	 * assume the chip has MMIO enabled by default (rev 0x20
-	 * and higher).
+	 * After AST2500, MMIO is enabled by default, and it should be adopted
+	 * to be compatible with ARM.
 	 */
-	if (!(pci_resource_flags(pdev, 2) & IORESOURCE_IO)) {
+	if (pdev->revision >= 0x40) {
+		ast->ioregs = ast->regs + AST_IO_MM_OFFSET;
+	} else if (!(pci_resource_flags(pdev, 2) & IORESOURCE_IO)) {
 		drm_info(dev, "platform has no IO space, trying MMIO\n");
 		ast->ioregs = ast->regs + AST_IO_MM_OFFSET;
 	}

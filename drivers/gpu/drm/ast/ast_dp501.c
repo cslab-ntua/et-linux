@@ -180,7 +180,10 @@ void ast_set_dp501_video_output(struct drm_device *dev, u8 mode)
 
 static u32 get_fw_base(struct ast_private *ast)
 {
-	return ast_mindwm(ast, 0x1e6e2104) & 0x7fffffff;
+	if (ast->chip == AST2500)
+		return ast_mindwm(ast, 0x1e6e2104) & 0xfffffffe;
+	else
+		return ast_mindwm(ast, 0x1e6e2104) & 0x7fffffff;
 }
 
 bool ast_backup_fw(struct drm_device *dev, u8 *addr, u32 size)
@@ -213,8 +216,8 @@ static bool ast_launch_m68k(struct drm_device *dev)
 	if (ast->config_mode != ast_use_p2a)
 		return false;
 
-	data = ast_mindwm(ast, 0x1e6e2100) & 0x01;
-	if (!data) {
+	data = ast_mindwm(ast, 0x1e6e2100) & 0x03;
+	if (data != 1) {
 
 		if (ast->dp501_fw_addr) {
 			fw_addr = ast->dp501_fw_addr;
@@ -230,21 +233,15 @@ static bool ast_launch_m68k(struct drm_device *dev)
 		/* Get BootAddress */
 		ast_moutdwm(ast, 0x1e6e2000, 0x1688a8a8);
 		data = ast_mindwm(ast, 0x1e6e0004);
-		switch (data & 0x03) {
-		case 0:
-			boot_address = 0x44000000;
-			break;
-		default:
-		case 1:
-			boot_address = 0x48000000;
-			break;
-		case 2:
-			boot_address = 0x50000000;
-			break;
-		case 3:
-			boot_address = 0x60000000;
-			break;
-		}
+		if (ast->chip == AST2500)
+			boot_address = 0x8000000;		/* 128MB */
+		else
+			boot_address = 0x4000000;		/* 64MB */
+		boot_address <<= (data & 0x03);
+		if (ast->chip == AST2500)
+			boot_address |= 0x80000000;		/* Base = 0x80000000 */
+		else
+			boot_address |= 0x40000000;		/* Base = 0x40000000 */
 		boot_address -= 0x200000; /* -2MB */
 
 		/* copy image to buffer */
@@ -257,7 +254,10 @@ static bool ast_launch_m68k(struct drm_device *dev)
 		ast_moutdwm(ast, 0x1e6e2000, 0x1688a8a8);
 
 		/* Launch FW */
-		ast_moutdwm(ast, 0x1e6e2104, 0x80000000 + boot_address);
+		if (ast->chip == AST2500)
+			ast_moutdwm(ast, 0x1e6e2104, boot_address | 0x00000001);
+		else
+			ast_moutdwm(ast, 0x1e6e2104, boot_address | 0x80000000);
 		ast_moutdwm(ast, 0x1e6e2100, 1);
 
 		/* Update Scratch */
@@ -437,7 +437,7 @@ void ast_init_3rdtx(struct drm_device *dev)
 	struct ast_private *ast = to_ast_private(dev);
 	u8 jreg;
 
-	if (ast->chip == AST2300 || ast->chip == AST2400) {
+	if (ast->chip == AST2300 || ast->chip == AST2400 || ast->chip == AST2500) {
 		jreg = ast_get_index_reg_mask(ast, AST_IO_CRTC_PORT, 0xd1, 0xff);
 		switch (jreg & 0x0e) {
 		case 0x04:
@@ -445,6 +445,7 @@ void ast_init_3rdtx(struct drm_device *dev)
 			break;
 		case 0x08:
 			ast_launch_m68k(dev);
+			ast_init_dvo(dev);
 			break;
 		case 0x0c:
 			ast_init_dvo(dev);
